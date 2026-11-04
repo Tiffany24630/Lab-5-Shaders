@@ -1,3 +1,11 @@
+pub mod assets;
+pub mod camera;
 pub mod color;
 pub mod framebuffer;
+pub mod geometry;
+pub mod math;
+pub mod pipeline;
+pub mod procedural;
 pub mod rasterizer;
+pub mod shader;
+pub mod shaders;
