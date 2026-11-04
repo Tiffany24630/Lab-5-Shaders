@@ -2,6 +2,7 @@ use std::fs;
 use std::io;
 use std::sync::Arc;
 use std::time::Instant;
+use std::env;
 
 use aetheria::animation::{BodyMotion, Orbit, RotationAxis};
 use aetheria::assets::load_obj;
@@ -22,8 +23,36 @@ use aetheria::shaders::umbra::UmbraShader;
 use aetheria::shaders::veridis::VeridisShader;
 use aetheria::shaders::vesper::VesperShader;
 use aetheria::shadows::ShadowScene;
+#[cfg(feature = "interactive")]
+use aetheria::window::CpuWindow;
 
 fn main() -> io::Result<()> {
+    let mut interactive = false;
+    for argument in env::args().skip(1) {
+        match argument.as_str() {
+            "--offline" => {}
+            "--interactive" => interactive = true,
+            _ => {
+                eprintln!("Uso: aetheria [--offline] [--interactive]");
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, "argumento desconocido"));
+            }
+        }
+    }
+    if interactive {
+        #[cfg(feature = "interactive")]
+        {
+            return run_app(true);
+        }
+        #[cfg(not(feature = "interactive"))]
+        {
+            eprintln!("El modo interactivo requiere compilar con: cargo run --features interactive -- --interactive");
+            return Err(io::Error::new(io::ErrorKind::Unsupported, "feature interactive no habilitada"));
+        }
+    }
+    run_app(false)
+}
+
+fn run_app(_interactive: bool) -> io::Result<()> {
     let solaris = load_obj("assets/models/obj/solaris.obj").map_err(io::Error::other)?;
     let vesper = load_obj("assets/models/obj/vesper.obj").map_err(io::Error::other)?;
     let selene = load_obj("assets/models/obj/selene.obj").map_err(io::Error::other)?;
@@ -83,12 +112,37 @@ fn main() -> io::Result<()> {
         rotation_speed: 0.07, rotation_phase: 0.0,
     };
 
+    #[cfg(feature = "interactive")]
+    if _interactive {
+        let time = 0.0;
+        let poses = build_poses(
+            time, solaris_motion, vesper_motion, nymara_motion, cryon_motion,
+            veridis_motion, umbra_motion, solene_motion,
+        );
+        let mut controller = OrbitCameraController::new(
+            BodyId::Solaris, camera.fov_y, camera.aspect, camera.near, camera.far,
+        );
+        controller.set_orbit(std::f32::consts::FRAC_PI_2, 0.30, 5.0);
+        let interactive_camera = controller
+            .camera_for_target(poses.get(BodyId::Solaris).world_position)
+            .map_err(io::Error::other)?;
+        let framebuffer = render_frame(
+            time, &interactive_camera, &solaris, &vesper, &selene, &nymara,
+            &ring_inner, &ring_middle, &ring_outer, &cryon, &veridis, &umbra,
+            &solene, poses,
+        )?;
+        let mut window = CpuWindow::new("AETHERIA — CPU Renderer", &framebuffer)
+            .map_err(io::Error::other)?;
+        window.run_until_closed().map_err(io::Error::other)?;
+        return Ok(());
+    }
+
     let outputs = [
-        ("output/phase19b_camera_static.ppm", 0.0, CameraMode::Static),
-        ("output/phase19b_camera_solaris.ppm", 4.0, CameraMode::Orbit(BodyId::Solaris, 5.0)),
-        ("output/phase19b_camera_vesper.ppm", 4.0, CameraMode::Orbit(BodyId::Vesper, 3.2)),
-        ("output/phase19b_camera_selene.ppm", 4.0, CameraMode::Orbit(BodyId::Selene, 2.0)),
-        ("output/phase19b_camera_nymara.ppm", 4.0, CameraMode::Orbit(BodyId::Nymara, 3.8)),
+        ("output/phase19c_camera_static.ppm", 0.0, CameraMode::Static),
+        ("output/phase19c_camera_solaris.ppm", 4.0, CameraMode::Orbit(BodyId::Solaris, 5.0)),
+        ("output/phase19c_camera_vesper.ppm", 4.0, CameraMode::Orbit(BodyId::Vesper, 4.8)),
+        ("output/phase19c_camera_selene.ppm", 4.0, CameraMode::Orbit(BodyId::Selene, 2.0)),
+        ("output/phase19c_camera_nymara.ppm", 4.0, CameraMode::Orbit(BodyId::Nymara, 6.2)),
     ];
     for (output, time, mode) in outputs {
         let poses = build_poses(
@@ -106,11 +160,13 @@ fn main() -> io::Result<()> {
                     .map_err(io::Error::other)?
             }
         };
-        render_frame(
-            time, output, &frame_camera, &solaris, &vesper, &selene, &nymara,
+        let framebuffer = render_frame(
+            time, &frame_camera, &solaris, &vesper, &selene, &nymara,
             &ring_inner, &ring_middle, &ring_outer, &cryon, &veridis, &umbra, &solene,
             poses,
         )?;
+        fs::create_dir_all("output")?;
+        framebuffer.save_ppm(output)?;
     }
     Ok(())
 }
@@ -169,14 +225,14 @@ fn build_poses(
 
 #[allow(clippy::too_many_arguments)]
 fn render_frame(
-    time: f32, output: &str, camera: &Camera,
+    time: f32, camera: &Camera,
     solaris: &aetheria::assets::ObjAsset, vesper: &aetheria::assets::ObjAsset,
     selene: &aetheria::assets::ObjAsset, nymara: &aetheria::assets::ObjAsset,
     ring_inner: &aetheria::assets::ObjAsset, ring_middle: &aetheria::assets::ObjAsset,
     ring_outer: &aetheria::assets::ObjAsset, cryon: &aetheria::assets::ObjAsset,
     veridis: &aetheria::assets::ObjAsset, umbra: &aetheria::assets::ObjAsset,
     solene: &aetheria::assets::ObjAsset, poses: BodyPoses,
-) -> io::Result<()> {
+) -> io::Result<Framebuffer> {
     let solaris_model = poses.get(BodyId::Solaris).model_matrix;
     let vesper_model = poses.get(BodyId::Vesper).model_matrix;
     let selene_model = poses.get(BodyId::Selene).model_matrix;
@@ -234,13 +290,8 @@ fn render_frame(
     render(9, &umbra.mesh, umbra_model, &umbra_shader);
     render(10, &solene.mesh, solene_model, &solene_shader);
 
-    fs::create_dir_all("output")?;
-    framebuffer.save_ppm(output)?;
-    println!(
-        "Rendered t={time:.2} to {output}; {} shadow triangles; {:?}",
-        shadow_scene.triangle_count(), render_start.elapsed()
-    );
-    Ok(())
+    println!("Rendered t={time:.2}; {} shadow triangles; {:?}", shadow_scene.triangle_count(), render_start.elapsed());
+    Ok(framebuffer)
 }
 
 trait RenderableShader {

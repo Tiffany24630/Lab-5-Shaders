@@ -13,3 +13,5 @@ pub mod scene;
 pub mod shader;
 pub mod shaders;
 pub mod shadows;
+#[cfg(feature = "interactive")]
+pub mod window;
