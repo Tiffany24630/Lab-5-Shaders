@@ -1,7 +1,7 @@
 use crate::color::Color;
 use crate::math::Vec3;
 use crate::procedural::{fbm, noise_3d, smoothstep};
-use crate::shader::{FragmentInput, FragmentShader, ShaderUniforms};
+use crate::shader::{apply_point_light, FragmentInput, FragmentShader, ShaderUniforms};
 
 #[derive(Clone, Copy, Debug)]
 pub struct SeleneShader {
@@ -93,15 +93,15 @@ impl FragmentShader for SeleneShader {
         color = lerp_color(color, raised_rim, (rim * depth * 0.58).clamp(0.0, 0.70));
 
         let normal = input.normal.normalized();
-        let light_direction = (uniforms.light_position - input.world_position).normalized();
-        let view_direction = (uniforms.camera_position - input.world_position).normalized();
-        let diffuse = normal.dot(light_direction).clamp(0.0, 1.0);
-        let rim_light = (1.0 - normal.dot(view_direction).clamp(0.0, 1.0)).powf(1.8);
-        let crater_light = (0.78 + 0.22 * rim - 0.18 * interior).clamp(0.45, 1.15);
-        let illumination = (0.48 + 0.40 * diffuse + 0.12 * rim_light)
-            * crater_light
-            * finite_or(self.light_intensity, 1.0).max(0.0);
-        scale_color(color, illumination)
+        let crater_light = (0.88 - 0.18 * interior).clamp(0.62, 1.0);
+        apply_point_light(
+            scale_color(color, crater_light),
+            Color::BLACK,
+            normal,
+            input.world_position,
+            uniforms,
+            self.light_intensity,
+        )
     }
 }
 

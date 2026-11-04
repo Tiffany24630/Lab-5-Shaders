@@ -1,7 +1,7 @@
 use crate::color::Color;
 use crate::math::Vec3;
 use crate::procedural::{fbm, noise_3d, smoothstep};
-use crate::shader::{FragmentInput, FragmentShader, ShaderUniforms};
+use crate::shader::{apply_point_light, FragmentInput, FragmentShader, ShaderUniforms};
 
 #[derive(Clone, Copy, Debug)]
 pub struct NymaraShader {
@@ -78,13 +78,14 @@ impl FragmentShader for NymaraShader {
         color = lerp_color(color, storm_color, (storm * 0.58).clamp(0.0, 0.68));
 
         let normal = input.normal.normalized();
-        let light_direction = (uniforms.light_position - input.world_position).normalized();
-        let view_direction = (uniforms.camera_position - input.world_position).normalized();
-        let diffuse = normal.dot(light_direction).clamp(0.0, 1.0);
-        let rim = (1.0 - normal.dot(view_direction).clamp(0.0, 1.0)).powf(1.8);
-        let illumination =
-            (0.54 + 0.36 * diffuse + 0.10 * rim) * finite_or(self.light_intensity, 1.0).max(0.0);
-        scale_color(color, illumination)
+        apply_point_light(
+            color,
+            Color::BLACK,
+            normal,
+            input.world_position,
+            uniforms,
+            self.light_intensity,
+        )
     }
 }
 
@@ -106,13 +107,21 @@ impl NymaraRingShader {
 }
 
 impl FragmentShader for NymaraRingShader {
-    fn shade(&self, input: &FragmentInput, _uniforms: &ShaderUniforms) -> Color {
+    fn shade(&self, input: &FragmentInput, uniforms: &ShaderUniforms) -> Color {
         let normal = input.normal.normalized();
         let variation = 0.86 + 0.14 * noise_3d(input.local_position * 5.0, self.seed);
         let face = 0.72 + 0.28 * normal.z.abs();
-        scale_color(
+        let base = scale_color(
             self.tint,
             finite_or(self.brightness, 0.75).max(0.0) * variation * face,
+        );
+        apply_point_light(
+            base,
+            Color::BLACK,
+            normal,
+            input.world_position,
+            uniforms,
+            1.0,
         )
     }
 }

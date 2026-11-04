@@ -1,7 +1,7 @@
 use crate::color::Color;
 use crate::math::Vec3;
 use crate::procedural::{fbm, noise_3d, smoothstep};
-use crate::shader::{FragmentInput, FragmentShader, ShaderUniforms};
+use crate::shader::{apply_point_light, FragmentInput, FragmentShader, ShaderUniforms};
 
 #[derive(Clone, Copy, Debug)]
 pub struct CryonShader {
@@ -89,18 +89,19 @@ impl FragmentShader for CryonShader {
         color = lerp_color(color, crystal_color, crystal * 0.72);
 
         let normal = input.normal.normalized();
-        let light_direction = (uniforms.light_position - input.world_position).normalized();
-        let view_direction = (uniforms.camera_position - input.world_position).normalized();
-        let diffuse = normal.dot(light_direction).clamp(0.0, 1.0);
-        let rim = (1.0 - normal.dot(view_direction).clamp(0.0, 1.0)).powf(1.8);
-        let crystal_glint = crystal * (0.10 + 0.24 * diffuse);
-        let illumination =
-            (0.50 + 0.38 * diffuse + 0.12 * rim) * finite_or(self.light_intensity, 1.0).max(0.0);
-        let lit = scale_color(color, illumination);
-        Color::new(
-            lit.r + crystal_glint * 0.35,
-            lit.g + crystal_glint * 0.45,
-            lit.b + crystal_glint * 0.55,
+        let crystal_glint = crystal * 0.24;
+        let crystal_emission = Color::new_const(
+            crystal_glint * 0.35,
+            crystal_glint * 0.45,
+            crystal_glint * 0.55,
+        );
+        apply_point_light(
+            color,
+            crystal_emission,
+            normal,
+            input.world_position,
+            uniforms,
+            self.light_intensity,
         )
     }
 }
@@ -135,10 +136,6 @@ fn lerp_color(a: Color, b: Color, t: f32) -> Color {
         a.g + (b.g - a.g) * t,
         a.b + (b.b - a.b) * t,
     )
-}
-
-fn scale_color(color: Color, factor: f32) -> Color {
-    Color::new(color.r * factor, color.g * factor, color.b * factor)
 }
 
 fn finite_or(value: f32, fallback: f32) -> f32 {

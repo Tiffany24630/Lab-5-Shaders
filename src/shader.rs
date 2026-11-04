@@ -17,6 +17,10 @@ pub struct ShaderUniforms {
     pub time: f32,
     pub camera_position: Vec3,
     pub light_position: Vec3,
+    pub light_color: Color,
+    pub light_intensity: f32,
+    pub light_attenuation: f32,
+    pub ambient_light: f32,
     pub parameters: [f32; 8],
 }
 
@@ -26,9 +30,70 @@ impl Default for ShaderUniforms {
             time: 0.0,
             camera_position: Vec3::ZERO,
             light_position: Vec3::new(0.0, 0.0, 1.0),
+            light_color: Color::WHITE,
+            light_intensity: 1.8,
+            light_attenuation: 0.04,
+            ambient_light: 0.10,
             parameters: [0.0; 8],
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PointLight {
+    pub name: &'static str,
+    pub position: Vec3,
+    pub color: Color,
+    pub intensity: f32,
+    pub attenuation: f32,
+}
+
+impl PointLight {
+    pub fn from_uniforms(uniforms: &ShaderUniforms) -> Self {
+        Self {
+            name: "Solaris",
+            position: uniforms.light_position,
+            color: uniforms.light_color,
+            intensity: uniforms.light_intensity,
+            attenuation: uniforms.light_attenuation,
+        }
+    }
+}
+
+pub fn apply_point_light(
+    base: Color,
+    emission: Color,
+    normal: Vec3,
+    world_position: Vec3,
+    uniforms: &ShaderUniforms,
+    material_intensity: f32,
+) -> Color {
+    let light = PointLight::from_uniforms(uniforms);
+    let offset = light.position - world_position;
+    let distance_squared = offset.length_squared();
+    let light_direction = offset.normalized();
+    let normal = normal.normalized();
+    let diffuse = normal.dot(light_direction).clamp(0.0, 1.0);
+    let intensity = finite_or(light.intensity, 0.0).max(0.0);
+    let attenuation = finite_or(light.attenuation, 0.04).max(0.0);
+    let distance_factor = if distance_squared.is_finite() {
+        1.0 / (1.0 + attenuation * distance_squared.max(0.0))
+    } else {
+        0.0
+    };
+    let material_intensity = finite_or(material_intensity, 1.0).max(0.0);
+    let ambient = finite_or(uniforms.ambient_light, 0.10).clamp(0.0, 1.0);
+    let diffuse_factor = diffuse * intensity * distance_factor * material_intensity;
+    let light_color = light.color;
+    Color::new(
+        base.r * (ambient + diffuse_factor * light_color.r) + emission.r,
+        base.g * (ambient + diffuse_factor * light_color.g) + emission.g,
+        base.b * (ambient + diffuse_factor * light_color.b) + emission.b,
+    )
+}
+
+fn finite_or(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() { value } else { fallback }
 }
 
 pub trait FragmentShader {
