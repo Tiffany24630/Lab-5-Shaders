@@ -61,6 +61,12 @@ impl Framebuffer {
         self.index(x, y).map(|index| self.depths[index])
     }
 
+    pub fn depth_test(&self, x: usize, y: usize, depth: f32) -> bool {
+        self.index(x, y)
+            .map(|index| depth.is_finite() && depth < self.depths[index])
+            .unwrap_or(false)
+    }
+
     pub fn write_pixel(&mut self, x: usize, y: usize, color: Color, depth: f32) -> bool {
         let Some(index) = self.index(x, y) else {
             return false;

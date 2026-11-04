@@ -33,6 +33,22 @@ impl Color {
     pub fn to_rgb8(self) -> [u8; 3] {
         [to_u8(self.r), to_u8(self.g), to_u8(self.b)]
     }
+
+    pub fn linear_to_srgb(self) -> Self {
+        Self::new(
+            linear_to_srgb_component(self.r),
+            linear_to_srgb_component(self.g),
+            linear_to_srgb_component(self.b),
+        )
+    }
+
+    pub fn srgb_to_linear(self) -> Self {
+        Self::new(
+            srgb_to_linear_component(self.r),
+            srgb_to_linear_component(self.g),
+            srgb_to_linear_component(self.b),
+        )
+    }
 }
 
 fn sanitize_component(value: f32) -> f32 {
@@ -46,6 +62,24 @@ fn sanitize_component(value: f32) -> f32 {
 fn to_u8(value: f32) -> u8 {
     let normalized = sanitize_component(value);
     (normalized * 255.0).round() as u8
+}
+
+fn linear_to_srgb_component(value: f32) -> f32 {
+    let value = sanitize_component(value);
+    if value <= 0.0031308 {
+        value * 12.92
+    } else {
+        1.055 * value.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+fn srgb_to_linear_component(value: f32) -> f32 {
+    let value = sanitize_component(value);
+    if value <= 0.04045 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 #[cfg(test)]
@@ -65,5 +99,15 @@ mod tests {
             Color::new(f32::NAN, f32::INFINITY, f32::NEG_INFINITY),
             Color::BLACK
         );
+    }
+
+    #[test]
+    fn color_space_helpers_are_inverse_approximately() {
+        let linear = Color::new(0.5, 0.2, 0.8);
+        let recovered = linear.linear_to_srgb().srgb_to_linear();
+        assert!((recovered.r - linear.r).abs() < 1e-5);
+        assert!((recovered.g - linear.g).abs() < 1e-5);
+        assert!((recovered.b - linear.b).abs() < 1e-5);
+        assert_eq!(Color::new(0.5, 0.5, 0.5).to_rgb8(), [128, 128, 128]);
     }
 }
