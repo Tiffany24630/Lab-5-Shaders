@@ -1,5 +1,6 @@
 use crate::color::Color;
 use crate::math::{Vec2, Vec3};
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FragmentInput {
@@ -12,7 +13,7 @@ pub struct FragmentInput {
     pub vertex_color: Color,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ShaderUniforms {
     pub time: f32,
     pub camera_position: Vec3,
@@ -21,6 +22,8 @@ pub struct ShaderUniforms {
     pub light_intensity: f32,
     pub light_attenuation: f32,
     pub ambient_light: f32,
+    pub shadow_scene: Option<Arc<crate::shadows::ShadowScene>>,
+    pub shadow_receiver: u32,
     pub parameters: [f32; 8],
 }
 
@@ -34,6 +37,8 @@ impl Default for ShaderUniforms {
             light_intensity: 1.8,
             light_attenuation: 0.04,
             ambient_light: 0.10,
+            shadow_scene: None,
+            shadow_receiver: u32::MAX,
             parameters: [0.0; 8],
         }
     }
@@ -83,7 +88,22 @@ pub fn apply_point_light(
     };
     let material_intensity = finite_or(material_intensity, 1.0).max(0.0);
     let ambient = finite_or(uniforms.ambient_light, 0.10).clamp(0.0, 1.0);
-    let diffuse_factor = diffuse * intensity * distance_factor * material_intensity;
+    let visibility = uniforms
+        .shadow_scene
+        .as_ref()
+        .map(|scene| {
+            if scene.is_occluded(
+                world_position,
+                light.position,
+                uniforms.shadow_receiver,
+            ) {
+                0.0
+            } else {
+                1.0
+            }
+        })
+        .unwrap_or(1.0);
+    let diffuse_factor = diffuse * intensity * distance_factor * material_intensity * visibility;
     let light_color = light.color;
     Color::new(
         base.r * (ambient + diffuse_factor * light_color.r) + emission.r,

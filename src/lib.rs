@@ -1,4 +1,5 @@
 pub mod assets;
+pub mod animation;
 pub mod camera;
 pub mod color;
 pub mod framebuffer;
@@ -9,3 +10,4 @@ pub mod procedural;
 pub mod rasterizer;
 pub mod shader;
 pub mod shaders;
+pub mod shadows;

@@ -1,7 +1,7 @@
 use crate::color::Color;
 use crate::math::Vec3;
 use crate::procedural::{fbm, noise_3d, smoothstep};
-use crate::shader::{FragmentInput, FragmentShader, ShaderUniforms};
+use crate::shader::{apply_point_light, FragmentInput, FragmentShader, ShaderUniforms};
 
 #[derive(Clone, Copy, Debug)]
 pub struct VesperShader {
@@ -75,15 +75,18 @@ impl FragmentShader for VesperShader {
         let lava = lava_palette(core);
         let lava_strength = activity * finite_or(self.lava_intensity, 1.0).max(0.0);
 
-        let view_direction = (uniforms.camera_position - input.world_position).normalized();
-        let rim = (1.0 - normal.dot(view_direction).clamp(0.0, 1.0)).powf(1.8);
-        let surface_light = 0.62 + 0.28 * orientation + 0.10 * rim;
-        let base = scale_color(rock_color, surface_light);
         let emitted = scale_color(
             lava,
             finite_or(self.emission, 1.15).max(0.0) * lava_strength,
         );
-        Color::new(base.r + emitted.r, base.g + emitted.g, base.b + emitted.b)
+        apply_point_light(
+            rock_color,
+            emitted,
+            normal,
+            input.world_position,
+            uniforms,
+            1.0,
+        )
     }
 }
 
