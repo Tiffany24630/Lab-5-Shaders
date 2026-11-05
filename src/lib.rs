@@ -4,6 +4,7 @@ pub mod camera;
 pub mod color;
 pub mod framebuffer;
 pub mod geometry;
+pub mod hud;
 pub mod math;
 pub mod orbit_camera;
 pub mod pipeline;
@@ -13,5 +14,6 @@ pub mod scene;
 pub mod shader;
 pub mod shaders;
 pub mod shadows;
+pub mod space_background;
 #[cfg(feature = "interactive")]
 pub mod window;

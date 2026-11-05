@@ -57,6 +57,26 @@ impl Framebuffer {
         self.index(x, y).map(|index| self.colors[index])
     }
 
+    pub fn color_buffer(&self) -> &[Color] {
+        &self.colors
+    }
+
+    pub fn restore_colors(&mut self, colors: &[Color]) -> bool {
+        if colors.len() != self.colors.len() {
+            return false;
+        }
+        self.colors.copy_from_slice(colors);
+        true
+    }
+
+    pub fn set_color_pixel(&mut self, x: usize, y: usize, color: Color) -> bool {
+        let Some(index) = self.index(x, y) else {
+            return false;
+        };
+        self.colors[index] = color;
+        true
+    }
+
     pub fn get_depth(&self, x: usize, y: usize) -> Option<f32> {
         self.index(x, y).map(|index| self.depths[index])
     }

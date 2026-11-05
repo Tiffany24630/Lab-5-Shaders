@@ -2,13 +2,19 @@ use std::fs;
 use std::io;
 use std::sync::Arc;
 use std::time::Instant;
+#[cfg(feature = "interactive")]
+use std::time::Duration;
 use std::env;
 
 use aetheria::animation::{BodyMotion, Orbit, RotationAxis};
+#[cfg(feature = "interactive")]
+use aetheria::animation::SimulationClock;
 use aetheria::assets::load_obj;
 use aetheria::camera::Camera;
 use aetheria::color::Color;
 use aetheria::framebuffer::Framebuffer;
+#[cfg(feature = "interactive")]
+use aetheria::hud::{self, HudState};
 use aetheria::math::{Mat4, Vec3};
 use aetheria::pipeline::render_mesh_with_shader;
 use aetheria::orbit_camera::OrbitCameraController;
@@ -24,7 +30,11 @@ use aetheria::shaders::veridis::VeridisShader;
 use aetheria::shaders::vesper::VesperShader;
 use aetheria::shadows::ShadowScene;
 #[cfg(feature = "interactive")]
+use aetheria::space_background::SpaceBackground;
+#[cfg(feature = "interactive")]
 use aetheria::window::CpuWindow;
+#[cfg(feature = "interactive")]
+use minifb::Key;
 
 fn main() -> io::Result<()> {
     let mut interactive = false;
@@ -114,9 +124,10 @@ fn run_app(_interactive: bool) -> io::Result<()> {
 
     #[cfg(feature = "interactive")]
     if _interactive {
-        let time = 0.0;
-        let poses = build_poses(
-            time, solaris_motion, vesper_motion, nymara_motion, cryon_motion,
+        let space_background = SpaceBackground::new(0xA37E_214D);
+        let mut clock = SimulationClock::new(1.0);
+        let mut poses = build_poses(
+            clock.time(), solaris_motion, vesper_motion, nymara_motion, cryon_motion,
             veridis_motion, umbra_motion, solene_motion,
         );
         let mut controller = OrbitCameraController::new(
@@ -126,14 +137,173 @@ fn run_app(_interactive: bool) -> io::Result<()> {
         let interactive_camera = controller
             .camera_for_target(poses.get(BodyId::Solaris).world_position)
             .map_err(io::Error::other)?;
-        let framebuffer = render_frame(
-            time, &interactive_camera, &solaris, &vesper, &selene, &nymara,
+        let mut background_colors = space_background.render(&interactive_camera, 800, 600);
+        let mut shadow_scene = build_shadow_scene(
+            &vesper, &selene, &nymara, &ring_inner, &ring_middle, &ring_outer,
+            &cryon, &veridis, &umbra, &solene, poses,
+        );
+        let mut framebuffer = render_frame(
+            clock.time(), &interactive_camera, &solaris, &vesper, &selene, &nymara,
             &ring_inner, &ring_middle, &ring_outer, &cryon, &veridis, &umbra,
-            &solene, poses,
+            &solene, poses, &shadow_scene, Some(&background_colors),
         )?;
+        let mut clean_colors = framebuffer.color_buffer().to_vec();
+        hud::draw(&mut framebuffer, HudState {
+            target: target_name(controller.target_id),
+            time: clock.time(),
+            paused: clock.is_paused(),
+            speed: clock.speed(),
+        });
         let mut window = CpuWindow::new("AETHERIA — CPU Renderer", &framebuffer)
             .map_err(io::Error::other)?;
-        window.run_until_closed().map_err(io::Error::other)?;
+        println!("Controles: arrastre izquierdo = rotar, rueda = zoom, 1-8 = objetivo, R = restablecer");
+        println!("Simulacion: Espacio = pausa/reanudar, +/- = velocidad, N = paso manual");
+        println!("Reproduciendo; velocidad {:.2}x; tiempo {:.3}; objetivo {}", clock.speed(), clock.time(), target_name(controller.target_id));
+        let mut dragging = false;
+        let mut previous_mouse = None;
+        let mut last_tick = Instant::now();
+        while window.is_open() {
+            let mut camera_changed = false;
+            let mut scene_changed = false;
+            let mut hud_dirty = false;
+            let mut background_changed = false;
+            let now = Instant::now();
+            let real_delta = now.duration_since(last_tick).as_secs_f32();
+            last_tick = now;
+            let real_delta = if real_delta.is_finite() {
+                real_delta.clamp(0.0, 0.25)
+            } else {
+                0.0
+            };
+            let mouse_position = window.mouse_position();
+            if window.left_mouse_down() {
+                if !dragging {
+                    dragging = true;
+                    previous_mouse = mouse_position;
+                } else if let (Some(previous), Some(current)) = (previous_mouse, mouse_position) {
+                    let delta_x = current.0 - previous.0;
+                    let delta_y = current.1 - previous.1;
+                    if delta_x != 0.0 || delta_y != 0.0 {
+                        let previous_controller = controller;
+                        controller.rotate_yaw(delta_x * 0.01);
+                        controller.rotate_pitch(-delta_y * 0.01);
+                        camera_changed = controller != previous_controller;
+                        background_changed |= camera_changed;
+                    }
+                    previous_mouse = Some(current);
+                }
+            } else {
+                dragging = false;
+                previous_mouse = None;
+            }
+            if let Some((_, wheel_y)) = window.scroll_wheel() {
+                if wheel_y != 0.0 {
+                    let previous_controller = controller;
+                    controller.zoom(-wheel_y * 0.5);
+                    camera_changed = controller != previous_controller;
+                }
+            }
+            for key in window.pressed_keys() {
+                if let Some(target) = body_id_from_key(key) {
+                    let previous_controller = controller;
+                    controller.set_target(target);
+                    if controller != previous_controller {
+                        println!("Objetivo seleccionado: {}", target_name(target));
+                        camera_changed = true;
+                        hud_dirty = true;
+                    }
+                } else if key == Key::R {
+                    let previous_controller = controller;
+                    controller.set_target(BodyId::Solaris);
+                    controller.set_orbit(std::f32::consts::FRAC_PI_2, 0.30, 5.0);
+                    if controller != previous_controller {
+                        println!("Camara restablecida: Solaris");
+                        camera_changed = true;
+                        hud_dirty = true;
+                        background_changed = controller.yaw != previous_controller.yaw
+                            || controller.pitch != previous_controller.pitch;
+                    }
+                } else if key == Key::Space {
+                    if clock.is_paused() {
+                        clock.resume();
+                        println!("Reproduciendo; velocidad {:.2}x; tiempo {:.3}", clock.speed(), clock.time());
+                    } else {
+                        clock.pause();
+                        println!("Pausado; velocidad {:.2}x; tiempo {:.3}", clock.speed(), clock.time());
+                    }
+                    hud_dirty = true;
+                } else if key == Key::Equal {
+                    let previous_speed = clock.speed();
+                    clock.set_speed((clock.speed() + 0.25).clamp(0.25, 4.0));
+                    if clock.speed() != previous_speed {
+                        println!("Velocidad de simulacion: {:.2}x", clock.speed());
+                        hud_dirty = true;
+                    }
+                } else if key == Key::Minus {
+                    let previous_speed = clock.speed();
+                    clock.set_speed((clock.speed() - 0.25).clamp(0.25, 4.0));
+                    if clock.speed() != previous_speed {
+                        println!("Velocidad de simulacion: {:.2}x", clock.speed());
+                        hud_dirty = true;
+                    }
+                } else if key == Key::N && clock.is_paused() {
+                    clock.advance_manual(1.0 / 60.0);
+                    scene_changed = true;
+                    hud_dirty = true;
+                    println!("Paso manual; tiempo {:.3}", clock.time());
+                }
+            }
+            if !clock.is_paused() {
+                let previous_time = clock.time();
+                clock.advance(real_delta);
+                if clock.time() != previous_time {
+                    scene_changed = true;
+                }
+            }
+            if scene_changed {
+                poses = build_poses(
+                    clock.time(), solaris_motion, vesper_motion, nymara_motion, cryon_motion,
+                    veridis_motion, umbra_motion, solene_motion,
+                );
+                shadow_scene = build_shadow_scene(
+                    &vesper, &selene, &nymara, &ring_inner, &ring_middle, &ring_outer,
+                    &cryon, &veridis, &umbra, &solene, poses,
+                );
+                camera_changed = true;
+                hud_dirty = true;
+                println!("Tiempo de simulacion: {:.3}", clock.time());
+            }
+            if camera_changed {
+                let current_camera = controller
+                    .camera_for_target(poses.get(controller.target_id).world_position)
+                    .map_err(io::Error::other)?;
+                if background_changed {
+                    background_colors = space_background.render(&current_camera, 800, 600);
+                }
+                let updated = render_frame(
+                    clock.time(), &current_camera, &solaris, &vesper, &selene, &nymara,
+                    &ring_inner, &ring_middle, &ring_outer, &cryon, &veridis, &umbra,
+                    &solene, poses, &shadow_scene, Some(&background_colors),
+                )?;
+                framebuffer = updated;
+                clean_colors = framebuffer.color_buffer().to_vec();
+                hud_dirty = true;
+            }
+            if hud_dirty {
+                if !camera_changed {
+                    framebuffer.restore_colors(&clean_colors);
+                }
+                hud::draw(&mut framebuffer, HudState {
+                    target: target_name(controller.target_id),
+                    time: clock.time(),
+                    paused: clock.is_paused(),
+                    speed: clock.speed(),
+                });
+                window.set_framebuffer(&framebuffer);
+            }
+            window.present().map_err(io::Error::other)?;
+            std::thread::sleep(Duration::from_millis(16));
+        }
         return Ok(());
     }
 
@@ -160,15 +330,48 @@ fn run_app(_interactive: bool) -> io::Result<()> {
                     .map_err(io::Error::other)?
             }
         };
+        let shadow_scene = build_shadow_scene(
+            &vesper, &selene, &nymara, &ring_inner, &ring_middle, &ring_outer,
+            &cryon, &veridis, &umbra, &solene, poses,
+        );
         let framebuffer = render_frame(
             time, &frame_camera, &solaris, &vesper, &selene, &nymara,
             &ring_inner, &ring_middle, &ring_outer, &cryon, &veridis, &umbra, &solene,
-            poses,
+            poses, &shadow_scene, None,
         )?;
         fs::create_dir_all("output")?;
         framebuffer.save_ppm(output)?;
     }
     Ok(())
+}
+
+#[cfg(feature = "interactive")]
+fn body_id_from_key(key: Key) -> Option<BodyId> {
+    Some(match key {
+        Key::Key1 => BodyId::Solaris,
+        Key::Key2 => BodyId::Vesper,
+        Key::Key3 => BodyId::Selene,
+        Key::Key4 => BodyId::Nymara,
+        Key::Key5 => BodyId::Cryon,
+        Key::Key6 => BodyId::Veridis,
+        Key::Key7 => BodyId::Umbra,
+        Key::Key8 => BodyId::Solene,
+        _ => return None,
+    })
+}
+
+#[cfg(feature = "interactive")]
+fn target_name(id: BodyId) -> &'static str {
+    match id {
+        BodyId::Solaris => "Solaris",
+        BodyId::Vesper => "Vesper",
+        BodyId::Selene => "Selene",
+        BodyId::Nymara => "Nymara",
+        BodyId::Cryon => "Cryon",
+        BodyId::Veridis => "Veridis",
+        BodyId::Umbra => "Umbra",
+        BodyId::Solene => "Solene",
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -223,6 +426,34 @@ fn build_poses(
     }))
 }
 
+fn build_shadow_scene(
+    vesper: &aetheria::assets::ObjAsset,
+    selene: &aetheria::assets::ObjAsset,
+    nymara: &aetheria::assets::ObjAsset,
+    ring_inner: &aetheria::assets::ObjAsset,
+    ring_middle: &aetheria::assets::ObjAsset,
+    ring_outer: &aetheria::assets::ObjAsset,
+    cryon: &aetheria::assets::ObjAsset,
+    veridis: &aetheria::assets::ObjAsset,
+    umbra: &aetheria::assets::ObjAsset,
+    solene: &aetheria::assets::ObjAsset,
+    poses: BodyPoses,
+) -> Arc<ShadowScene> {
+    let objects = [
+        (1, &vesper.mesh, poses.get(BodyId::Vesper).model_matrix),
+        (2, &selene.mesh, poses.get(BodyId::Selene).model_matrix),
+        (3, &nymara.mesh, poses.get(BodyId::Nymara).model_matrix),
+        (4, &ring_inner.mesh, poses.get(BodyId::Nymara).model_matrix),
+        (5, &ring_middle.mesh, poses.get(BodyId::Nymara).model_matrix),
+        (6, &ring_outer.mesh, poses.get(BodyId::Nymara).model_matrix),
+        (7, &cryon.mesh, poses.get(BodyId::Cryon).model_matrix),
+        (8, &veridis.mesh, poses.get(BodyId::Veridis).model_matrix),
+        (9, &umbra.mesh, poses.get(BodyId::Umbra).model_matrix),
+        (10, &solene.mesh, poses.get(BodyId::Solene).model_matrix),
+    ];
+    Arc::new(ShadowScene::from_meshes(&objects))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_frame(
     time: f32, camera: &Camera,
@@ -232,6 +463,8 @@ fn render_frame(
     ring_outer: &aetheria::assets::ObjAsset, cryon: &aetheria::assets::ObjAsset,
     veridis: &aetheria::assets::ObjAsset, umbra: &aetheria::assets::ObjAsset,
     solene: &aetheria::assets::ObjAsset, poses: BodyPoses,
+    shadow_scene: &Arc<ShadowScene>,
+    background_colors: Option<&[Color]>,
 ) -> io::Result<Framebuffer> {
     let solaris_model = poses.get(BodyId::Solaris).model_matrix;
     let vesper_model = poses.get(BodyId::Vesper).model_matrix;
@@ -242,13 +475,6 @@ fn render_frame(
     let umbra_model = poses.get(BodyId::Umbra).model_matrix;
     let solene_model = poses.get(BodyId::Solene).model_matrix;
 
-    let shadow_scene = Arc::new(ShadowScene::from_meshes(&[
-        (1, &vesper.mesh, vesper_model), (2, &selene.mesh, selene_model),
-        (3, &nymara.mesh, nymara_model), (4, &ring_inner.mesh, nymara_model),
-        (5, &ring_middle.mesh, nymara_model), (6, &ring_outer.mesh, nymara_model),
-        (7, &cryon.mesh, cryon_model), (8, &veridis.mesh, veridis_model),
-        (9, &umbra.mesh, umbra_model), (10, &solene.mesh, solene_model),
-    ]));
     let uniforms = ShaderUniforms {
         time, camera_position: camera.position,
         light_position: solaris_model.transform_point(Vec3::ZERO),
@@ -258,6 +484,11 @@ fn render_frame(
     };
     let mut framebuffer = Framebuffer::new(800, 600).map_err(io::Error::other)?;
     framebuffer.clear(Color::new(0.003, 0.004, 0.010));
+    if let Some(colors) = background_colors {
+        if colors.len() == framebuffer.width() * framebuffer.height() {
+            framebuffer.restore_colors(colors);
+        }
+    }
 
     let solaris_shader = SolarisShader::default();
     let vesper_shader = VesperShader::default();

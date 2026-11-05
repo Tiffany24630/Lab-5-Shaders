@@ -32,7 +32,16 @@ impl SimulationClock {
     }
 
     pub fn advance_manual(&mut self, delta_time: f32) {
-        self.advance(delta_time);
+        let delta_time = if delta_time.is_finite() {
+            delta_time.max(0.0)
+        } else {
+            0.0
+        };
+        self.delta_time = delta_time;
+        self.time += delta_time * finite_or(self.speed, 1.0);
+        if !self.time.is_finite() {
+            self.time = 0.0;
+        }
     }
 
     pub fn pause(&mut self) {
@@ -47,6 +56,14 @@ impl SimulationClock {
         if speed.is_finite() {
             self.speed = speed;
         }
+    }
+
+    pub const fn speed(&self) -> f32 {
+        self.speed
+    }
+
+    pub const fn is_paused(&self) -> bool {
+        self.paused
     }
 
     pub const fn time(&self) -> f32 {
