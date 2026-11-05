@@ -16,10 +16,25 @@ pub struct DetailedProfileStats {
     pub shadow_aabb_passed: u64,
     pub shadow_triangle_tests: u64,
     pub shadow_occluded: u64,
+    pub brute_queries: u64,
+    pub brute_triangle_tests: u64,
+    pub brute_occluded: u64,
+    pub bvh_queries: u64,
+    pub bvh_nodes_visited: u64,
+    pub bvh_nodes_discarded: u64,
+    pub bvh_leaves_visited: u64,
+    pub bvh_triangle_tests: u64,
+    pub bvh_occluded: u64,
+    pub bvh_max_depth: u32,
+    pub bvh_stack_fallbacks: u64,
 }
 
 #[derive(Clone, Debug)]
 pub struct DetailedProfile(Rc<RefCell<DetailedProfileStats>>);
+
+impl PartialEq for DetailedProfile {
+    fn eq(&self, other: &Self) -> bool { Rc::ptr_eq(&self.0, &other.0) }
+}
 
 impl DetailedProfile {
     pub fn new() -> Self {
@@ -58,4 +73,18 @@ impl DetailedProfile {
     pub fn add_shadow_aabb_passed(&self) { self.0.borrow_mut().shadow_aabb_passed += 1; }
     pub fn add_shadow_triangle_test(&self) { self.0.borrow_mut().shadow_triangle_tests += 1; }
     pub fn add_shadow_occluded(&self) { self.0.borrow_mut().shadow_occluded += 1; }
+    pub fn add_brute_query(&self) { self.0.borrow_mut().brute_queries += 1; }
+    pub fn add_brute_triangle_test(&self) { self.0.borrow_mut().brute_triangle_tests += 1; }
+    pub fn add_brute_occluded(&self) { self.0.borrow_mut().brute_occluded += 1; }
+    pub fn add_bvh_query(&self) { self.0.borrow_mut().bvh_queries += 1; }
+    pub fn add_bvh_node_visited(&self) { self.0.borrow_mut().bvh_nodes_visited += 1; }
+    pub fn add_bvh_node_discarded(&self) { self.0.borrow_mut().bvh_nodes_discarded += 1; }
+    pub fn add_bvh_leaf(&self) { self.0.borrow_mut().bvh_leaves_visited += 1; }
+    pub fn add_bvh_triangle_test(&self) { self.0.borrow_mut().bvh_triangle_tests += 1; }
+    pub fn add_bvh_occluded(&self) { self.0.borrow_mut().bvh_occluded += 1; }
+    pub fn observe_bvh_depth(&self, depth: u32) {
+        let mut stats = self.0.borrow_mut();
+        stats.bvh_max_depth = stats.bvh_max_depth.max(depth);
+    }
+    pub fn add_bvh_stack_fallback(&self) { self.0.borrow_mut().bvh_stack_fallbacks += 1; }
 }

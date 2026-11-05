@@ -25,7 +25,6 @@ pub fn render_mesh(
     model: Mat4,
     camera: &Camera,
 ) -> usize {
-    let preparation_started = uniforms.detail_profile.as_ref().map(|_| Instant::now());
     render_mesh_with_shader(
         framebuffer,
         mesh,
@@ -76,6 +75,7 @@ pub fn render_triangle_with_shader<S: FragmentShader>(
     shader: &S,
     uniforms: &ShaderUniforms,
 ) -> usize {
+    let preparation_started = uniforms.detail_profile.as_ref().map(|_| Instant::now());
     let view = camera.view_matrix();
     let transform = camera.projection_matrix() * view * model;
     let vertices = triangle.vertices.map(|vertex| ClipVertex {
