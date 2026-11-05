@@ -1,6 +1,7 @@
 use crate::color::Color;
 use crate::framebuffer::Framebuffer;
 use crate::math::Vec3;
+use crate::profile::RasterTriangleCounters;
 use crate::shader::{FragmentInput, FragmentShader, ShaderUniforms, VertexColorShader};
 use std::time::Instant;
 
@@ -103,6 +104,8 @@ pub fn rasterize_triangle_with_shader<S: FragmentShader>(
     shader: &S,
     uniforms: &ShaderUniforms,
 ) -> usize {
+    let raster_detail = uniforms.raster_detail_profile.as_ref();
+    let mut counters = RasterTriangleCounters::default();
     if vertices.iter().any(|vertex| {
         !vertex.x.is_finite()
             || !vertex.y.is_finite()
@@ -120,15 +123,18 @@ pub fn rasterize_triangle_with_shader<S: FragmentShader>(
                 .map(|uv| !uv.x.is_finite() || !uv.y.is_finite())
                 .unwrap_or(false)
     }) {
+        if let Some(profile) = raster_detail { profile.add_raster(counters); }
         return 0;
     }
 
     let [v0, v1, v2] = vertices;
     let area = edge(v0.x, v0.y, v1.x, v1.y, v2.x, v2.y);
     if !area.is_finite() || area.abs() <= f32::EPSILON {
+        if let Some(profile) = raster_detail { profile.add_raster(counters); }
         return 0;
     }
 
+    let bounding_box_started = raster_detail.map(|_| Instant::now());
     let min_x = v0.x.min(v1.x).min(v2.x).floor().max(0.0) as i32;
     let max_x =
         v0.x.max(v1.x)
@@ -143,22 +149,48 @@ pub fn rasterize_triangle_with_shader<S: FragmentShader>(
             .ceil()
             .min(framebuffer.height() as f32) as i32
             - 1;
+    if let (Some(profile), Some(started)) = (raster_detail, bounding_box_started) {
+        let mut sample = RasterTriangleCounters::default();
+        sample.bounding_boxes = 1;
+        sample.bounding_box_ns = started.elapsed().as_nanos();
+        profile.add_raster(sample);
+    }
     if min_x > max_x || min_y > max_y {
+        if let Some(profile) = raster_detail { profile.add_raster(counters); }
         return 0;
     }
+    counters.candidate_pixels = (max_x - min_x + 1) as u64 * (max_y - min_y + 1) as u64;
 
     let mut written = 0;
+    let mut candidate_index = 0u64;
     for y in min_y..=max_y {
         for x in min_x..=max_x {
+            let sampled = candidate_index % 64 == 0;
+            candidate_index += 1;
+            let coverage_started = sampled.then(Instant::now);
             let px = x as f32 + 0.5;
             let py = y as f32 + 0.5;
             let lambda0 = edge(v1.x, v1.y, v2.x, v2.y, px, py) / area;
             let lambda1 = edge(v2.x, v2.y, v0.x, v0.y, px, py) / area;
             let lambda2 = edge(v0.x, v0.y, v1.x, v1.y, px, py) / area;
             if lambda0 < -1.0e-6 || lambda1 < -1.0e-6 || lambda2 < -1.0e-6 {
+                if let (Some(profile), Some(started)) = (raster_detail, coverage_started) {
+                    let mut sample = RasterTriangleCounters::default();
+                    sample.coverage_samples = 1;
+                    sample.coverage_ns = started.elapsed().as_nanos();
+                    profile.add_raster(sample);
+                }
                 continue;
             }
+            counters.covered_pixels += 1;
+            if let (Some(profile), Some(started)) = (raster_detail, coverage_started) {
+                let mut sample = RasterTriangleCounters::default();
+                sample.coverage_samples = 1;
+                sample.coverage_ns = started.elapsed().as_nanos();
+                profile.add_raster(sample);
+            }
 
+            let interpolation_started = sampled.then(Instant::now);
             let inv_w = lambda0 * v0.inv_w + lambda1 * v1.inv_w + lambda2 * v2.inv_w;
             if !inv_w.is_finite() || inv_w <= f32::EPSILON {
                 continue;
@@ -187,9 +219,18 @@ pub fn rasterize_triangle_with_shader<S: FragmentShader>(
                 color_over_w.g / inv_w,
                 color_over_w.b / inv_w,
             );
-            if !framebuffer.depth_test(x as usize, y as usize, depth) {
+            let depth_started = sampled.then(Instant::now);
+            let depth_passed = framebuffer.depth_test(x as usize, y as usize, depth);
+            if let (Some(profile), Some(started)) = (raster_detail, depth_started) {
+                let mut sample = RasterTriangleCounters::default();
+                sample.depth_samples = 1;
+                sample.depth_ns = started.elapsed().as_nanos();
+                profile.add_raster(sample);
+            }
+            if !depth_passed {
                 continue;
             }
+            counters.depth_passed += 1;
             let normal_over_w = v0.normal_over_w * lambda0
                 + v1.normal_over_w * lambda1
                 + v2.normal_over_w * lambda2;
@@ -210,24 +251,48 @@ pub fn rasterize_triangle_with_shader<S: FragmentShader>(
                 screen_position,
                 vertex_color: color,
             };
+            if let (Some(profile), Some(started)) = (raster_detail, interpolation_started) {
+                let mut sample = RasterTriangleCounters::default();
+                sample.interpolation_samples = 1;
+                sample.interpolation_ns = started.elapsed().as_nanos();
+                profile.add_raster(sample);
+            }
+            counters.shader_evaluations += 1;
+            let raster_shader_started = raster_detail.filter(|_| sampled).map(|_| Instant::now());
             let shader_started = uniforms.detail_profile.as_ref().map(|_| Instant::now());
             let shaded = shader.shade(&input, uniforms);
+            if let (Some(profile), Some(started)) = (raster_detail, raster_shader_started) {
+                let mut sample = RasterTriangleCounters::default();
+                sample.shader_samples = 1;
+                sample.shader_ns = started.elapsed().as_nanos();
+                profile.add_raster(sample);
+            }
             if let (Some(profile), Some(shader_started)) = (&uniforms.detail_profile, shader_started) {
                 profile.add_shader(shader_started.elapsed());
             }
             if !shaded.r.is_finite() || !shaded.g.is_finite() || !shaded.b.is_finite() {
                 continue;
             }
-            if framebuffer.write_pixel(
+            let write_started = sampled.then(Instant::now);
+            let pixel_written = framebuffer.write_pixel(
                 x as usize,
                 y as usize,
                 Color::new(shaded.r, shaded.g, shaded.b),
                 depth,
-            ) {
+            );
+            if let (Some(profile), Some(started)) = (raster_detail, write_started) {
+                let mut sample = RasterTriangleCounters::default();
+                sample.write_samples = 1;
+                sample.write_ns = started.elapsed().as_nanos();
+                profile.add_raster(sample);
+            }
+            if pixel_written {
+                counters.written_fragments += 1;
                 written += 1;
             }
         }
     }
+    if let Some(profile) = raster_detail { profile.add_raster(counters); }
     written
 }
 

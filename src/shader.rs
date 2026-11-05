@@ -1,7 +1,7 @@
 use crate::color::Color;
 use crate::diagnostics::{DiagnosticObject, DiagnosticSample, DiagnosticsHandle, LavaDiagnostic};
 use crate::math::{Vec2, Vec3};
-use crate::profile::DetailedProfile;
+use crate::profile::{DetailedProfile, RasterDetailProfile};
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -30,6 +30,7 @@ pub struct ShaderUniforms {
     pub diagnostic_object: Option<DiagnosticObject>,
     pub vesper_emission_curve: Option<(f32, f32)>,
     pub detail_profile: Option<DetailedProfile>,
+    pub raster_detail_profile: Option<RasterDetailProfile>,
     pub parameters: [f32; 8],
 }
 
@@ -49,6 +50,7 @@ impl Default for ShaderUniforms {
             diagnostic_object: None,
             vesper_emission_curve: None,
             detail_profile: None,
+            raster_detail_profile: None,
             parameters: [0.0; 8],
         }
     }

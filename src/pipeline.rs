@@ -75,6 +75,8 @@ pub fn render_triangle_with_shader<S: FragmentShader>(
     shader: &S,
     uniforms: &ShaderUniforms,
 ) -> usize {
+    if let Some(profile) = &uniforms.raster_detail_profile { profile.add_input(); }
+    let transform_started = uniforms.raster_detail_profile.as_ref().map(|_| Instant::now());
     let preparation_started = uniforms.detail_profile.as_ref().map(|_| Instant::now());
     let view = camera.view_matrix();
     let transform = camera.projection_matrix() * view * model;
@@ -87,17 +89,35 @@ pub fn render_triangle_with_shader<S: FragmentShader>(
         world_position: model.transform_point(vertex.position),
         uv: vertex.texcoord,
     });
+    if let (Some(profile), Some(started)) = (&uniforms.raster_detail_profile, transform_started) {
+        profile.add_transform(started.elapsed());
+    }
     if vertices.iter().any(|vertex| !finite_clip_vertex(*vertex)) {
+        if let Some(profile) = &uniforms.raster_detail_profile { profile.add_invalid(); }
         return 0;
     }
 
+    let clipping_started = uniforms.raster_detail_profile.as_ref().map(|_| Instant::now());
     let polygon = clip_frustum(&vertices);
+    if let (Some(profile), Some(started)) = (&uniforms.raster_detail_profile, clipping_started) {
+        profile.add_clipping(started.elapsed());
+    }
+    let clipped = triangulate(&polygon);
+    if let Some(profile) = &uniforms.raster_detail_profile { profile.add_clipped(clipped.len()); }
     let mut written = 0;
-    for triangle in triangulate(&polygon) {
+    for triangle in clipped {
+        let projection_started = uniforms.raster_detail_profile.as_ref().map(|_| Instant::now());
         let Some(projected) = project_triangle(triangle, framebuffer.width(), framebuffer.height())
         else {
+            if let (Some(profile), Some(started)) = (&uniforms.raster_detail_profile, projection_started) {
+                profile.add_projection(started.elapsed());
+            }
             continue;
         };
+        if let (Some(profile), Some(started)) = (&uniforms.raster_detail_profile, projection_started) {
+            profile.add_projection(started.elapsed());
+            profile.add_projected();
+        }
         if let (Some(profile), Some(preparation_started)) = (&uniforms.detail_profile, preparation_started.as_ref()) {
             profile.add_preparation(preparation_started.elapsed());
         }

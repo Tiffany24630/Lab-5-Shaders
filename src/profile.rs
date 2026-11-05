@@ -29,6 +29,94 @@ pub struct DetailedProfileStats {
     pub bvh_stack_fallbacks: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RasterDetailStats {
+    pub input_triangles: u64,
+    pub invalid_triangles: u64,
+    pub clipped_triangles: u64,
+    pub projected_triangles: u64,
+    pub transform_ns: u128,
+    pub clipping_ns: u128,
+    pub projection_ns: u128,
+    pub bounding_boxes: u64,
+    pub bounding_box_ns: u128,
+    pub candidate_pixels: u64,
+    pub covered_pixels: u64,
+    pub depth_passed: u64,
+    pub shader_evaluations: u64,
+    pub written_fragments: u64,
+    pub coverage_samples: u64,
+    pub coverage_ns: u128,
+    pub interpolation_samples: u64,
+    pub interpolation_ns: u128,
+    pub depth_samples: u64,
+    pub depth_ns: u128,
+    pub shader_samples: u64,
+    pub shader_ns: u128,
+    pub write_samples: u64,
+    pub write_ns: u128,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RasterTriangleCounters {
+    pub bounding_boxes: u64,
+    pub bounding_box_ns: u128,
+    pub candidate_pixels: u64,
+    pub covered_pixels: u64,
+    pub depth_passed: u64,
+    pub shader_evaluations: u64,
+    pub written_fragments: u64,
+    pub coverage_samples: u64,
+    pub coverage_ns: u128,
+    pub interpolation_samples: u64,
+    pub interpolation_ns: u128,
+    pub depth_samples: u64,
+    pub depth_ns: u128,
+    pub shader_samples: u64,
+    pub shader_ns: u128,
+    pub write_samples: u64,
+    pub write_ns: u128,
+}
+
+#[derive(Clone, Debug)]
+pub struct RasterDetailProfile(Rc<RefCell<RasterDetailStats>>);
+
+impl PartialEq for RasterDetailProfile {
+    fn eq(&self, other: &Self) -> bool { Rc::ptr_eq(&self.0, &other.0) }
+}
+
+impl RasterDetailProfile {
+    pub fn new() -> Self { Self(Rc::new(RefCell::new(RasterDetailStats::default()))) }
+    pub fn snapshot(&self) -> RasterDetailStats { *self.0.borrow() }
+    pub fn add_input(&self) { self.0.borrow_mut().input_triangles += 1; }
+    pub fn add_invalid(&self) { self.0.borrow_mut().invalid_triangles += 1; }
+    pub fn add_clipped(&self, count: usize) { self.0.borrow_mut().clipped_triangles += count as u64; }
+    pub fn add_projected(&self) { self.0.borrow_mut().projected_triangles += 1; }
+    pub fn add_transform(&self, duration: Duration) { self.0.borrow_mut().transform_ns += duration.as_nanos(); }
+    pub fn add_clipping(&self, duration: Duration) { self.0.borrow_mut().clipping_ns += duration.as_nanos(); }
+    pub fn add_projection(&self, duration: Duration) { self.0.borrow_mut().projection_ns += duration.as_nanos(); }
+    pub fn add_raster(&self, counters: RasterTriangleCounters) {
+        let mut stats = self.0.borrow_mut();
+        stats.bounding_boxes += counters.bounding_boxes;
+        stats.bounding_box_ns += counters.bounding_box_ns;
+        stats.candidate_pixels += counters.candidate_pixels;
+        stats.covered_pixels += counters.covered_pixels;
+        stats.depth_passed += counters.depth_passed;
+        stats.shader_evaluations += counters.shader_evaluations;
+        stats.written_fragments += counters.written_fragments;
+        stats.coverage_samples += counters.coverage_samples;
+        stats.coverage_ns += counters.coverage_ns;
+        stats.interpolation_samples += counters.interpolation_samples;
+        stats.interpolation_ns += counters.interpolation_ns;
+        stats.depth_samples += counters.depth_samples;
+        stats.depth_ns += counters.depth_ns;
+        stats.shader_samples += counters.shader_samples;
+        stats.shader_ns += counters.shader_ns;
+        stats.write_samples += counters.write_samples;
+        stats.write_ns += counters.write_ns;
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct DetailedProfile(Rc<RefCell<DetailedProfileStats>>);
 

@@ -109,6 +109,13 @@ struct Bvh {
 pub struct ShadowComparisonStats {
     pub eligible_queries: u64,
     pub queries_compared: u64,
+    pub brute_ns: u128,
+    pub bvh_ns: u128,
+    pub brute_triangle_tests: u64,
+    pub bvh_triangle_tests: u64,
+    pub brute_occluded: u64,
+    pub bvh_occluded: u64,
+    pub bvh_stack_fallbacks: u64,
     pub matches: u64,
     pub discrepancies: u64,
     pub false_positives: u64,
@@ -195,7 +202,7 @@ pub struct ShadowScene {
 
 impl ShadowScene {
     pub fn from_meshes(objects: &[(u32, &Mesh, Mat4)]) -> Self {
-        Self::from_meshes_with_bvh(objects, false)
+        Self::from_meshes_with_bvh(objects, true)
     }
 
     pub fn from_meshes_with_bvh(objects: &[(u32, &Mesh, Mat4)], use_bvh: bool) -> Self {
@@ -271,13 +278,24 @@ impl ShadowScene {
         let direction = to_light / distance;
         let origin = point + direction * (EPSILON * 4.0);
         let use_bvh = self.bvh.is_some();
+        let time_route = self.compare_algorithms && self.compare_all;
+        let route_started = time_route.then(Instant::now);
+        let mut route_triangle_tests = 0u64;
         let occluded = if use_bvh {
             if let Some(profile) = profile { profile.add_bvh_query(); }
-            self.is_occluded_bvh(origin, direction, distance - EPSILON, receiver_id, profile)
+            self.is_occluded_bvh(origin, direction, distance - EPSILON, receiver_id, profile, time_route, &mut route_triangle_tests)
         } else {
             if let Some(profile) = profile { profile.add_brute_query(); }
-            self.is_occluded_brute(origin, direction, distance - EPSILON, receiver_id, profile)
+            self.is_occluded_brute(origin, direction, distance - EPSILON, receiver_id, profile, time_route, &mut route_triangle_tests)
         };
+        if let Some(started) = route_started {
+            let mut stats = self.comparison_stats.borrow_mut();
+            if use_bvh { stats.bvh_ns += started.elapsed().as_nanos(); } else { stats.brute_ns += started.elapsed().as_nanos(); }
+            if use_bvh { stats.bvh_triangle_tests += route_triangle_tests; } else { stats.brute_triangle_tests += route_triangle_tests; }
+            if occluded {
+                if use_bvh { stats.bvh_occluded += 1; } else { stats.brute_occluded += 1; }
+            }
+        }
         if self.compare_algorithms && self.bvh.is_some() {
             let mut stats = self.comparison_stats.borrow_mut();
             stats.eligible_queries += 1;
@@ -287,14 +305,28 @@ impl ShadowScene {
             *query_index = query_index.saturating_add(1);
             if sampled {
                 let brute_occluded = if use_bvh {
-                    self.is_occluded_brute(origin, direction, distance - EPSILON, receiver_id, None)
+                    let started = Instant::now();
+                    let mut triangle_tests = 0u64;
+                    let result = self.is_occluded_brute(origin, direction, distance - EPSILON, receiver_id, None, true, &mut triangle_tests);
+                    let mut stats = self.comparison_stats.borrow_mut();
+                    stats.brute_ns += started.elapsed().as_nanos();
+                    stats.brute_triangle_tests += triangle_tests;
+                    if result { stats.brute_occluded += 1; }
+                    result
                 } else {
                     occluded
                 };
                 let bvh_occluded = if use_bvh {
                     occluded
                 } else {
-                    self.is_occluded_bvh(origin, direction, distance - EPSILON, receiver_id, None)
+                    let started = Instant::now();
+                    let mut triangle_tests = 0u64;
+                    let result = self.is_occluded_bvh(origin, direction, distance - EPSILON, receiver_id, None, true, &mut triangle_tests);
+                    let mut stats = self.comparison_stats.borrow_mut();
+                    stats.bvh_ns += started.elapsed().as_nanos();
+                    stats.bvh_triangle_tests += triangle_tests;
+                    if result { stats.bvh_occluded += 1; }
+                    result
                 };
                 let mut stats = self.comparison_stats.borrow_mut();
                 stats.queries_compared += 1;
@@ -325,7 +357,7 @@ impl ShadowScene {
         occluded
     }
 
-    fn is_occluded_brute(&self, origin: Vec3, direction: Vec3, max_distance: f32, receiver_id: u32, profile: Option<&DetailedProfile>) -> bool {
+    fn is_occluded_brute(&self, origin: Vec3, direction: Vec3, max_distance: f32, receiver_id: u32, profile: Option<&DetailedProfile>, track_comparison: bool, comparison_triangle_tests: &mut u64) -> bool {
         for object in &self.objects {
             if object.object_id == receiver_id
             {
@@ -339,6 +371,7 @@ impl ShadowScene {
             for triangle in &object.triangles {
                 if let Some(profile) = profile { profile.add_shadow_triangle_test(); }
                 if let Some(profile) = profile { profile.add_brute_triangle_test(); }
+                if track_comparison { *comparison_triangle_tests += 1; }
                 if ray_triangle_intersection(origin, direction, triangle.vertices)
                     .is_some_and(|hit| hit < max_distance)
                 {
@@ -350,7 +383,7 @@ impl ShadowScene {
         false
     }
 
-    fn is_occluded_bvh(&self, origin: Vec3, direction: Vec3, max_distance: f32, receiver_id: u32, profile: Option<&DetailedProfile>) -> bool {
+    fn is_occluded_bvh(&self, origin: Vec3, direction: Vec3, max_distance: f32, receiver_id: u32, profile: Option<&DetailedProfile>, track_comparison: bool, comparison_triangle_tests: &mut u64) -> bool {
         let bvh = self.bvh.as_ref().expect("BVH route requires BVH");
         let Some((_, _)) = bvh.nodes[0].bounds.intersection_interval(origin, direction, 0.0, max_distance) else {
             if let Some(profile) = profile { profile.add_bvh_node_discarded(); }
@@ -381,6 +414,7 @@ impl ShadowScene {
                         profile.add_shadow_triangle_test();
                         profile.add_bvh_triangle_test();
                     }
+                    if track_comparison { *comparison_triangle_tests += 1; }
                     let triangle = object.triangles[primitive.triangle_index];
                     if ray_triangle_intersection(origin, direction, triangle.vertices).is_some_and(|hit| hit < max_distance) {
                         if let Some(profile) = profile { profile.add_bvh_occluded(); }
@@ -404,7 +438,8 @@ impl ShadowScene {
                     stack_len += 1;
                 } else {
                     if let Some(profile) = profile { profile.add_bvh_stack_fallback(); }
-                    return self.is_occluded_brute(origin, direction, max_distance, receiver_id, None);
+                    if track_comparison { self.comparison_stats.borrow_mut().bvh_stack_fallbacks += 1; }
+                    return self.is_occluded_brute(origin, direction, max_distance, receiver_id, None, track_comparison, comparison_triangle_tests);
                 }
             }
         }
