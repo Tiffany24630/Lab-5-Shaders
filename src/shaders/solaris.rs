@@ -90,6 +90,7 @@ impl FragmentShader for SolarisShader {
             display_color,
             shadow_visibility: None,
             material_intensity: 0.0,
+            lava: None,
         });
         display_color
     }

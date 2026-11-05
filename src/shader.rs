@@ -1,5 +1,5 @@
 use crate::color::Color;
-use crate::diagnostics::{DiagnosticObject, DiagnosticSample, DiagnosticsHandle};
+use crate::diagnostics::{DiagnosticObject, DiagnosticSample, DiagnosticsHandle, LavaDiagnostic};
 use crate::math::{Vec2, Vec3};
 use std::sync::Arc;
 
@@ -77,6 +77,30 @@ pub fn apply_point_light(
     world_position: Vec3,
     uniforms: &ShaderUniforms,
     material_intensity: f32,
+) -> Color {
+    apply_point_light_internal(base, emission, normal, world_position, uniforms, material_intensity, None)
+}
+
+pub fn apply_point_light_with_lava(
+    base: Color,
+    emission: Color,
+    normal: Vec3,
+    world_position: Vec3,
+    uniforms: &ShaderUniforms,
+    material_intensity: f32,
+    lava: LavaDiagnostic,
+) -> Color {
+    apply_point_light_internal(base, emission, normal, world_position, uniforms, material_intensity, Some(lava))
+}
+
+fn apply_point_light_internal(
+    base: Color,
+    emission: Color,
+    normal: Vec3,
+    world_position: Vec3,
+    uniforms: &ShaderUniforms,
+    material_intensity: f32,
+    lava: Option<LavaDiagnostic>,
 ) -> Color {
     let light = PointLight::from_uniforms(uniforms);
     let offset = light.position - world_position;
@@ -159,6 +183,7 @@ pub fn apply_point_light(
         display_color,
         shadow_visibility: Some(visibility),
         material_intensity,
+        lava,
     });
     display_color
 }

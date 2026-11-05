@@ -40,21 +40,32 @@ use minifb::Key;
 fn main() -> io::Result<()> {
     let mut interactive = false;
     let mut diagnostics = false;
+    let mut diagnostics_only = false;
     for argument in env::args().skip(1) {
         match argument.as_str() {
             "--offline" => {}
             "--interactive" => interactive = true,
             "--diagnostics" => diagnostics = true,
+            "--diagnostics-only" => {
+                diagnostics = true;
+                diagnostics_only = true;
+            }
             _ => {
-                eprintln!("Uso: aetheria [--offline] [--interactive] [--diagnostics]");
+                eprintln!("Uso: aetheria [--offline] [--interactive] [--diagnostics] [--diagnostics-only]");
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "argumento desconocido"));
             }
         }
     }
+    if interactive && diagnostics_only {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--diagnostics-only requiere el modo offline",
+        ));
+    }
     if interactive {
         #[cfg(feature = "interactive")]
         {
-            return run_app(true, diagnostics);
+            return run_app(true, diagnostics, diagnostics_only);
         }
         #[cfg(not(feature = "interactive"))]
         {
@@ -62,10 +73,10 @@ fn main() -> io::Result<()> {
             return Err(io::Error::new(io::ErrorKind::Unsupported, "feature interactive no habilitada"));
         }
     }
-    run_app(false, diagnostics)
+    run_app(false, diagnostics, diagnostics_only)
 }
 
-fn run_app(_interactive: bool, diagnostics_enabled: bool) -> io::Result<()> {
+fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool) -> io::Result<()> {
     let solaris = load_obj("assets/models/obj/solaris.obj").map_err(io::Error::other)?;
     let vesper = load_obj("assets/models/obj/vesper.obj").map_err(io::Error::other)?;
     let selene = load_obj("assets/models/obj/selene.obj").map_err(io::Error::other)?;
@@ -342,8 +353,13 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool) -> io::Result<()> {
             &ring_inner, &ring_middle, &ring_outer, &cryon, &veridis, &umbra, &solene,
             poses, &shadow_scene, None, diagnostics_enabled,
         )?;
-        fs::create_dir_all("output")?;
-        framebuffer.save_ppm(output)?;
+        if !diagnostics_only {
+            fs::create_dir_all("output")?;
+            framebuffer.save_ppm(output)?;
+        }
+        if diagnostics_only {
+            break;
+        }
     }
     Ok(())
 }

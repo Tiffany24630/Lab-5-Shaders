@@ -1,7 +1,8 @@
 use crate::color::Color;
+use crate::diagnostics::LavaDiagnostic;
 use crate::math::Vec3;
 use crate::procedural::{fbm, noise_3d, smoothstep};
-use crate::shader::{apply_point_light, FragmentInput, FragmentShader, ShaderUniforms};
+use crate::shader::{apply_point_light_with_lava, FragmentInput, FragmentShader, ShaderUniforms};
 
 #[derive(Clone, Copy, Debug)]
 pub struct VesperShader {
@@ -73,19 +74,25 @@ impl FragmentShader for VesperShader {
         let thermal_variation = 0.72 + 0.28 * fbm(point * 3.0, self.seed.wrapping_add(211), 3);
         let activity = (core * 0.85 + edge * 0.22) * thermal_variation;
         let lava = lava_palette(core);
-        let lava_strength = activity * finite_or(self.lava_intensity, 1.0).max(0.0);
+        let lava_intensity = finite_or(self.lava_intensity, 1.0).max(0.0);
+        let lava_strength = activity * lava_intensity;
 
         let emitted = scale_color(
             lava,
             finite_or(self.emission, 1.15).max(0.0) * lava_strength,
         );
-        apply_point_light(
+        apply_point_light_with_lava(
             rock_color,
             emitted,
             normal,
             input.world_position,
             uniforms,
             1.0,
+            LavaDiagnostic {
+                activity,
+                lava_intensity,
+                lava_strength,
+            },
         )
     }
 }
