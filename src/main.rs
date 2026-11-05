@@ -20,7 +20,8 @@ use aetheria::framebuffer::Framebuffer;
 use aetheria::hud::{self, HudState};
 use aetheria::math::{Mat4, Vec3};
 use aetheria::pipeline::render_mesh_with_shader;
-use aetheria::profile::{DetailedProfile, DetailedProfileStats, RasterDetailProfile, RasterDetailStats, ShaderDetailProfile, ShaderDetailStats};
+use aetheria::procedural::{fbm_comparison_stats, fbm_normalization_table_matches_original, set_fbm_comparison, set_fbm_precomputed, FBM_NORMALIZATION_TABLE};
+use aetheria::profile::{DetailedProfile, DetailedProfileStats, ProceduralDetailProfile, ProceduralDetailStats, RasterDetailProfile, RasterDetailStats, ShaderDetailProfile, ShaderDetailStats};
 use aetheria::orbit_camera::OrbitCameraController;
 use aetheria::scene::{BodyId, BodyPose, BodyPoses};
 use aetheria::shader::ShaderUniforms;
@@ -102,6 +103,7 @@ struct ProfileFrame {
     detail: DetailedProfileStats,
     raster_detail: RasterDetailStats,
     shader_detail: ShaderDetailStats,
+    procedural_detail: ProceduralDetailStats,
 }
 
 #[cfg(feature = "interactive")]
@@ -199,6 +201,32 @@ impl ProfileWindow {
                 }
             }
         }
+        let procedural_frames = self.samples.iter().filter(|sample| sample.procedural_detail.objects.iter().any(|object| object.evaluations > 0)).count();
+        if procedural_frames > 0 {
+            println!("  procedural_detail frames={procedural_frames}/{} sample_rate=continuous_stratified_one_of_64_per_object; fbm_time_inclusive; noise_time_nested_in_fbm", self.samples.len());
+            for (index, object) in DiagnosticObject::ALL.into_iter().enumerate() {
+                let stats = self.samples.iter().fold((0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u128, 0u64, 0u128), |acc, sample| {
+                    let item = sample.procedural_detail.objects[index];
+                    (
+                        acc.0 + item.evaluations,
+                        acc.1 + item.sampled_evaluations,
+                        acc.2 + item.fbm_calls,
+                        acc.3 + item.fbm_octaves,
+                        acc.4 + item.fbm_samples,
+                        acc.5 + item.noise_calls,
+                        acc.6 + item.fbm_ns,
+                        acc.7 + item.noise_samples,
+                        acc.8 + item.noise_ns,
+                    )
+                });
+                if stats.0 > 0 {
+                    let factor = stats.0 as f64 / stats.1.max(1) as f64;
+                    let fbm_ms = stats.6 as f64 / 1_000_000.0 * factor;
+                    let noise_ms = if stats.7 == 0 { 0.0 } else { stats.8 as f64 / 1_000_000.0 * factor };
+                    println!("    {} evaluations={} samples={} factor={:.3} fbm_calls={} octaves={} noise_calls={} sampled_fbm={} sampled_noise={} fbm_inclusive_ms={:.3} noise_nested_ms={:.3}", object.name(), stats.0, stats.1, factor, stats.2, stats.3, stats.5, stats.4, stats.7, fbm_ms, noise_ms);
+                }
+            }
+        }
         let bvh_frames = self.samples.iter().filter(|sample| sample.bvh_nodes > 0).count();
         if bvh_frames > 0 {
             println!("  bvh_structure frames={bvh_frames} nodes_avg={:.1} triangles_avg={:.1} build_depth_max={}", average(|sample| sample.bvh_nodes as f64), average(|sample| sample.bvh_triangles as f64), self.samples.iter().map(|s| s.bvh_depth).max().unwrap_or(0));
@@ -217,11 +245,19 @@ fn main() -> io::Result<()> {
     let mut profile_detail = false;
     let mut profile_raster_detail = false;
     let mut profile_shader_detail = false;
+    let mut profile_procedural_detail = false;
+    let mut benchmark_static = false;
     let mut shadow_bvh = true;
     let mut shadow_bvh_explicit = false;
     let mut shadow_brute_force = false;
     let mut shadow_compare = false;
     let mut shadow_compare_all = false;
+    let mut solene_normalized = false;
+    let mut solene_experiment_original = false;
+    let mut fbm_precomputed = false;
+    let mut fbm_original = false;
+    let mut fbm_compare = false;
+    let mut benchmark_fbm = false;
     let mut preview = None;
     let mut arguments = env::args().skip(1);
     while let Some(argument) = arguments.next() {
@@ -246,6 +282,14 @@ fn main() -> io::Result<()> {
                 profile = true;
                 profile_shader_detail = true;
             }
+            "--profile-procedural-detail" => {
+                profile = true;
+                profile_procedural_detail = true;
+            }
+            "--benchmark-static" => {
+                benchmark_static = true;
+                profile = true;
+            }
             "--shadow-bvh" => {
                 shadow_bvh = true;
                 shadow_bvh_explicit = true;
@@ -259,13 +303,19 @@ fn main() -> io::Result<()> {
                 shadow_compare = true;
                 shadow_compare_all = true;
             }
+            "--solene-normalized" => solene_normalized = true,
+            "--solene-experiment-original" => solene_experiment_original = true,
+            "--fbm-precomputed" => fbm_precomputed = true,
+            "--fbm-original" => fbm_original = true,
+            "--fbm-compare" => fbm_compare = true,
+            "--benchmark-fbm" => benchmark_fbm = true,
             "--preview" => {
                 let value = arguments.next().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "--preview requiere original, A, B o C"))?;
                 preview = Some(PreviewCurve::parse(&value).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "preview invalido: use original, A, B o C"))?);
                 diagnostics = true;
             }
             _ => {
-                eprintln!("Uso: aetheria [--offline] [--interactive] [--diagnostics] [--diagnostics-only] [--preview original|A|B|C] [--profile] [--profile-detail] [--profile-raster-detail] [--profile-shader-detail] [--shadow-bvh] [--shadow-brute-force] [--shadow-compare] [--shadow-compare-all]");
+                eprintln!("Uso: aetheria [--offline] [--interactive] [--diagnostics] [--diagnostics-only] [--preview original|A|B|C] [--profile] [--profile-detail] [--profile-raster-detail] [--profile-shader-detail] [--profile-procedural-detail] [--benchmark-static] [--benchmark-fbm] [--shadow-bvh] [--shadow-brute-force] [--shadow-compare] [--shadow-compare-all] [--solene-normalized] [--solene-experiment-original] [--fbm-original|--fbm-precomputed|--fbm-compare]");
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "argumento desconocido"));
             }
         }
@@ -282,10 +332,31 @@ fn main() -> io::Result<()> {
     if shadow_bvh_explicit && shadow_brute_force {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "--shadow-bvh y --shadow-brute-force son incompatibles"));
     }
+    if solene_normalized && solene_experiment_original {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "los modos experimentales de Solene son incompatibles"));
+    }
+    if (fbm_precomputed as u8 + fbm_original as u8 + fbm_compare as u8) > 1 {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "los modos de FBM son incompatibles"));
+    }
+    if (fbm_precomputed || fbm_original || fbm_compare) && interactive {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "los modos de FBM requieren el modo offline"));
+    }
+    if benchmark_fbm && interactive {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "--benchmark-fbm requiere el modo offline"));
+    }
+    if benchmark_fbm && (!fbm_original && !fbm_precomputed || fbm_original && fbm_precomputed) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "--benchmark-fbm requiere exactamente --fbm-original o --fbm-precomputed"));
+    }
+    if interactive && solene_experiment_original {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "--solene-experiment-original requiere el modo offline"));
+    }
+    if (solene_normalized || solene_experiment_original) && preview.is_some() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "los modos experimentales de Solene no se combinan con --preview"));
+    }
     if interactive {
         #[cfg(feature = "interactive")]
         {
-            return run_app(true, diagnostics, diagnostics_only, preview, profile, profile_detail, profile_raster_detail, profile_shader_detail, shadow_bvh, shadow_compare, shadow_compare_all);
+            return run_app(true, diagnostics, diagnostics_only, preview, profile, profile_detail, profile_raster_detail, profile_shader_detail, profile_procedural_detail, benchmark_static, shadow_bvh, shadow_compare, shadow_compare_all, solene_normalized, solene_experiment_original, fbm_precomputed, fbm_original, fbm_compare, benchmark_fbm);
         }
         #[cfg(not(feature = "interactive"))]
         {
@@ -293,10 +364,10 @@ fn main() -> io::Result<()> {
             return Err(io::Error::new(io::ErrorKind::Unsupported, "feature interactive no habilitada"));
         }
     }
-    run_app(false, diagnostics, diagnostics_only, preview, profile, profile_detail, profile_raster_detail, profile_shader_detail, shadow_bvh, shadow_compare, shadow_compare_all)
+    run_app(false, diagnostics, diagnostics_only, preview, profile, profile_detail, profile_raster_detail, profile_shader_detail, profile_procedural_detail, benchmark_static, shadow_bvh, shadow_compare, shadow_compare_all, solene_normalized, solene_experiment_original, fbm_precomputed, fbm_original, fbm_compare, benchmark_fbm)
 }
 
-fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool, preview: Option<PreviewCurve>, profile_enabled: bool, profile_detail: bool, profile_raster_detail: bool, profile_shader_detail: bool, shadow_bvh: bool, shadow_compare: bool, shadow_compare_all: bool) -> io::Result<()> {
+fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool, preview: Option<PreviewCurve>, profile_enabled: bool, profile_detail: bool, profile_raster_detail: bool, profile_shader_detail: bool, profile_procedural_detail: bool, benchmark_static: bool, shadow_bvh: bool, shadow_compare: bool, shadow_compare_all: bool, solene_normalized: bool, solene_experiment_original: bool, fbm_precomputed: bool, fbm_original: bool, fbm_compare: bool, benchmark_fbm: bool) -> io::Result<()> {
     #[cfg(not(feature = "interactive"))]
     let _ = profile_enabled;
     #[cfg(not(feature = "interactive"))]
@@ -305,6 +376,12 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
     let _ = profile_raster_detail;
     #[cfg(not(feature = "interactive"))]
     let _ = profile_shader_detail;
+    #[cfg(not(feature = "interactive"))]
+    let _ = profile_procedural_detail;
+    set_fbm_precomputed(fbm_precomputed);
+    set_fbm_comparison(fbm_compare);
+    #[cfg(not(feature = "interactive"))]
+    let _ = benchmark_static;
     #[cfg(not(feature = "interactive"))]
     let _ = shadow_bvh;
     #[cfg(not(feature = "interactive"))]
@@ -370,10 +447,20 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
         rotation_speed: 0.07, rotation_phase: 0.0,
     };
 
+    if benchmark_fbm {
+        return run_fbm_benchmark(
+            &camera, &solaris, &vesper, &selene, &nymara, &ring_inner, &ring_middle,
+            &ring_outer, &cryon, &veridis, &umbra, &solene, solaris_motion, vesper_motion,
+            nymara_motion, cryon_motion, veridis_motion, umbra_motion, solene_motion,
+            shadow_bvh, fbm_precomputed,
+        );
+    }
+
     #[cfg(feature = "interactive")]
     if _interactive {
         let space_background = SpaceBackground::new(0xA37E_214D);
         let mut clock = SimulationClock::new(1.0);
+        if benchmark_static { clock.pause(); }
         let mut poses = build_poses(
             clock.time(), solaris_motion, vesper_motion, nymara_motion, cryon_motion,
             veridis_motion, umbra_motion, solene_motion,
@@ -393,7 +480,7 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
         let mut framebuffer = render_frame(
             clock.time(), &interactive_camera, &solaris, &vesper, &selene, &nymara,
             &ring_inner, &ring_middle, &ring_outer, &cryon, &veridis, &umbra,
-            &solene, poses, &shadow_scene, Some(&background_colors), diagnostics_enabled, None, None, None, None, None,
+            &solene, poses, &shadow_scene, Some(&background_colors), diagnostics_enabled, None, solene_normalized, None, None, None, None, None,
         )?;
         let mut clean_colors = framebuffer.color_buffer().to_vec();
         hud::draw(&mut framebuffer, HudState {
@@ -412,6 +499,7 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
         let mut last_tick = Instant::now();
         let mut profiler = profile_enabled.then(ProfileWindow::new);
         let shader_detail_profile = profile_shader_detail.then(ShaderDetailProfile::new);
+        let procedural_detail_profile = profile_procedural_detail.then(ProceduralDetailProfile::new);
         while window.is_open() {
             let frame_start = Instant::now();
             let mut profile_frame = ProfileFrame::default();
@@ -513,6 +601,7 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
                     scene_changed = true;
                 }
             }
+            if benchmark_static { camera_changed = true; }
             profile_frame.update_ms = update_start.elapsed().as_secs_f64() * 1000.0;
             if scene_changed {
                 let poses_start = Instant::now();
@@ -554,7 +643,7 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
                 let updated = render_frame(
                     clock.time(), &current_camera, &solaris, &vesper, &selene, &nymara,
                     &ring_inner, &ring_middle, &ring_outer, &cryon, &veridis, &umbra,
-                    &solene, poses, &shadow_scene, Some(&background_colors), diagnostics_enabled, None, detail_profile.clone(), raster_detail_profile.clone(), shader_detail_profile.clone(), Some(&mut profile_frame),
+                    &solene, poses, &shadow_scene, Some(&background_colors), diagnostics_enabled, None, solene_normalized, detail_profile.clone(), raster_detail_profile.clone(), shader_detail_profile.clone(), procedural_detail_profile.clone(), Some(&mut profile_frame),
                 )?;
                 if let Some(detail_profile) = detail_profile {
                     profile_frame.detail = detail_profile.snapshot();
@@ -564,6 +653,9 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
                 }
                 if let Some(shader_detail_profile) = &shader_detail_profile {
                     profile_frame.shader_detail = shader_detail_profile.take_frame_snapshot();
+                }
+                if let Some(procedural_detail_profile) = &procedural_detail_profile {
+                    profile_frame.procedural_detail = procedural_detail_profile.take_frame_snapshot();
                 }
                 framebuffer = updated;
                 clean_colors = framebuffer.color_buffer().to_vec();
@@ -610,10 +702,41 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
             println!("[SHADOW-COMPARE] transform_ms={:.3} bvh_build_ms={:.3} bvh_nodes={} bvh_triangles={} bvh_depth={}", shadow_scene.transform_ns() as f64 / 1_000_000.0, shadow_scene.bvh_build_ns() as f64 / 1_000_000.0, shadow_scene.bvh_node_count(), shadow_scene.bvh_triangle_count(), shadow_scene.bvh_max_depth());
             if let Some(first) = stats.first_discrepancy { println!("[SHADOW-COMPARE] first discrepancy origin=({:.6},{:.6},{:.6}) direction=({:.6},{:.6},{:.6}) max_distance={:.6} receiver={} brute={} bvh={}", first.origin.x, first.origin.y, first.origin.z, first.direction.x, first.direction.y, first.direction.z, first.max_distance, first.receiver_id, first.brute_occluded, first.bvh_occluded); }
         }
+        if fbm_compare {
+            let (calls, mismatches) = fbm_comparison_stats();
+            println!("[FBM-COMPARE] calls={calls} bitwise_mismatches={mismatches}");
+        }
         return Ok(());
     }
 
-    let outputs = if let Some(preview) = preview {
+    if fbm_compare {
+        println!("[FBM-COMPARE] divisors_bitwise_equal={}", fbm_normalization_table_matches_original());
+        println!("[FBM-COMPARE] normalization_table_bits=");
+        for (octaves, divisor) in FBM_NORMALIZATION_TABLE.iter().enumerate() {
+            println!("  octaves={octaves} divisor={divisor:.9} bits=0x{:08X}", divisor.to_bits());
+        }
+    }
+    let outputs = if fbm_original || fbm_precomputed {
+        let output = if fbm_original {
+            "output/phase22l3_fbm_original.ppm"
+        } else {
+            "output/phase22l3_fbm_precomputed.ppm"
+        };
+        if std::path::Path::new(output).exists() {
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("salida experimental ya existe: {output}")));
+        }
+        vec![(output, 0.0, CameraMode::Static)]
+    } else if solene_experiment_original || solene_normalized {
+        let output = if solene_experiment_original {
+            "output/phase22k3_solene_original.ppm"
+        } else {
+            "output/phase22k3_solene_normalized.ppm"
+        };
+        if std::path::Path::new(output).exists() {
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("salida experimental ya existe: {output}")));
+        }
+        vec![(output, 0.0, CameraMode::Static)]
+    } else if let Some(preview) = preview {
         let output = preview.output_path();
         if std::path::Path::new(output).exists() {
             return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("preview ya existe: {output}")));
@@ -652,7 +775,7 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
         let framebuffer = render_frame(
             time, &frame_camera, &solaris, &vesper, &selene, &nymara,
             &ring_inner, &ring_middle, &ring_outer, &cryon, &veridis, &umbra, &solene,
-            poses, &shadow_scene, None, diagnostics_enabled, preview.and_then(PreviewCurve::parameters), None, None, None, None,
+            poses, &shadow_scene, None, diagnostics_enabled, preview.and_then(PreviewCurve::parameters), solene_normalized, None, None, None, None, None,
         )?;
         if !diagnostics_only {
             fs::create_dir_all("output")?;
@@ -673,7 +796,15 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
                 println!("[SHADOW-COMPARE] transform_ms={:.3} bvh_build_ms={:.3} bvh_nodes={} bvh_triangles={} bvh_depth={}", shadow_scene.transform_ns() as f64 / 1_000_000.0, shadow_scene.bvh_build_ns() as f64 / 1_000_000.0, shadow_scene.bvh_node_count(), shadow_scene.bvh_triangle_count(), shadow_scene.bvh_max_depth());
                 if let Some(first) = stats.first_discrepancy { println!("[SHADOW-COMPARE] first discrepancy origin=({:.6},{:.6},{:.6}) direction=({:.6},{:.6},{:.6}) max_distance={:.6} receiver={} brute={} bvh={}", first.origin.x, first.origin.y, first.origin.z, first.direction.x, first.direction.y, first.direction.z, first.max_distance, first.receiver_id, first.brute_occluded, first.bvh_occluded); }
             }
+            if fbm_compare {
+                let (calls, mismatches) = fbm_comparison_stats();
+                println!("[FBM-COMPARE] calls={calls} bitwise_mismatches={mismatches}");
+            }
             break;
+        }
+        if fbm_compare {
+            let (calls, mismatches) = fbm_comparison_stats();
+            println!("[FBM-COMPARE] calls={calls} bitwise_mismatches={mismatches}");
         }
     }
     Ok(())
@@ -760,6 +891,72 @@ fn build_poses(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn run_fbm_benchmark(
+    camera: &Camera,
+    solaris: &aetheria::assets::ObjAsset,
+    vesper: &aetheria::assets::ObjAsset,
+    selene: &aetheria::assets::ObjAsset,
+    nymara: &aetheria::assets::ObjAsset,
+    ring_inner: &aetheria::assets::ObjAsset,
+    ring_middle: &aetheria::assets::ObjAsset,
+    ring_outer: &aetheria::assets::ObjAsset,
+    cryon: &aetheria::assets::ObjAsset,
+    veridis: &aetheria::assets::ObjAsset,
+    umbra: &aetheria::assets::ObjAsset,
+    solene: &aetheria::assets::ObjAsset,
+    solaris_motion: BodyMotion,
+    vesper_motion: BodyMotion,
+    nymara_motion: BodyMotion,
+    cryon_motion: BodyMotion,
+    veridis_motion: BodyMotion,
+    umbra_motion: BodyMotion,
+    solene_motion: BodyMotion,
+    shadow_bvh: bool,
+    fbm_precomputed: bool,
+) -> io::Result<()> {
+    let poses = build_poses(
+        0.0, solaris_motion, vesper_motion, nymara_motion, cryon_motion,
+        veridis_motion, umbra_motion, solene_motion,
+    );
+    let shadow_scene = build_shadow_scene(
+        vesper, selene, nymara, ring_inner, ring_middle, ring_outer,
+        cryon, veridis, umbra, solene, poses, shadow_bvh, false, false,
+    );
+    #[cfg(feature = "interactive")]
+    let background_colors = Some(aetheria::space_background::SpaceBackground::new(0xA37E_214D).render(camera, 800, 600));
+    #[cfg(not(feature = "interactive"))]
+    let background_colors: Option<Vec<Color>> = None;
+
+    const WARMUP: usize = 10;
+    const MEASURED: usize = 60;
+    let mut samples = Vec::with_capacity(MEASURED);
+    for iteration in 0..(WARMUP + MEASURED) {
+        let started = Instant::now();
+        let _framebuffer = render_frame(
+            0.0, camera, solaris, vesper, selene, nymara,
+            ring_inner, ring_middle, ring_outer, cryon, veridis, umbra, solene,
+            poses, &shadow_scene, background_colors.as_deref(), false, None, false,
+            None, None, None, None, None,
+        )?;
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+        if iteration >= WARMUP {
+            samples.push(elapsed_ms);
+        }
+    }
+    samples.sort_by(f64::total_cmp);
+    let sum: f64 = samples.iter().sum();
+    let average = sum / samples.len() as f64;
+    let percentile = |p: f64| samples[((samples.len() - 1) as f64 * p).round() as usize];
+    println!(
+        "[FBM-BENCH] variant={} warmup={} measured={} poses=1 shadow_scene_builds=1 background_generations=1 presentation=0 wait=0 total_ms={:.3} avg_ms={:.3} median_ms={:.3} p95_ms={:.3} p99_ms={:.3} min_ms={:.3} max_ms={:.3} fps_equiv={:.3}",
+        if fbm_precomputed { "precomputed" } else { "original" }, WARMUP, MEASURED,
+        sum, average, percentile(0.50), percentile(0.95), percentile(0.99),
+        samples[0], *samples.last().unwrap(), 1000.0 / average,
+    );
+    Ok(())
+}
+
 fn build_shadow_scene(
     vesper: &aetheria::assets::ObjAsset,
     selene: &aetheria::assets::ObjAsset,
@@ -804,9 +1001,11 @@ fn render_frame(
     background_colors: Option<&[Color]>,
     diagnostics_enabled: bool,
     vesper_emission_curve: Option<(f32, f32)>,
+    solene_normalized: bool,
     detail_profile: Option<DetailedProfile>,
     raster_detail_profile: Option<RasterDetailProfile>,
     shader_detail_profile: Option<ShaderDetailProfile>,
+    procedural_detail_profile: Option<ProceduralDetailProfile>,
     mut profile_frame: Option<&mut ProfileFrame>,
 ) -> io::Result<Framebuffer> {
     let solaris_model = poses.get(BodyId::Solaris).model_matrix;
@@ -826,9 +1025,11 @@ fn render_frame(
         light_attenuation: 0.04, ambient_light: 0.10,
         shadow_scene: Some(shadow_scene.clone()), diagnostics: diagnostics.clone(),
         vesper_emission_curve,
+        solene_normalized_light: solene_normalized,
         detail_profile,
         raster_detail_profile,
         shader_detail_profile,
+        procedural_detail_profile,
         ..ShaderUniforms::default()
     };
     let framebuffer_setup_start = Instant::now();

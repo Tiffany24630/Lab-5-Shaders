@@ -1,7 +1,7 @@
 use crate::color::Color;
 use crate::diagnostics::{DiagnosticObject, DiagnosticSample, DiagnosticsHandle, LavaDiagnostic};
 use crate::math::{Vec2, Vec3};
-use crate::profile::{DetailedProfile, RasterDetailProfile, ShaderDetailProfile};
+use crate::profile::{DetailedProfile, ProceduralDetailProfile, RasterDetailProfile, ShaderDetailProfile};
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -32,6 +32,8 @@ pub struct ShaderUniforms {
     pub detail_profile: Option<DetailedProfile>,
     pub raster_detail_profile: Option<RasterDetailProfile>,
     pub shader_detail_profile: Option<ShaderDetailProfile>,
+    pub procedural_detail_profile: Option<ProceduralDetailProfile>,
+    pub solene_normalized_light: bool,
     pub parameters: [f32; 8],
 }
 
@@ -53,6 +55,8 @@ impl Default for ShaderUniforms {
             detail_profile: None,
             raster_detail_profile: None,
             shader_detail_profile: None,
+            procedural_detail_profile: None,
+            solene_normalized_light: false,
             parameters: [0.0; 8],
         }
     }
@@ -87,7 +91,18 @@ pub fn apply_point_light(
     uniforms: &ShaderUniforms,
     material_intensity: f32,
 ) -> Color {
-    apply_point_light_internal(base, emission, normal, world_position, uniforms, material_intensity, None)
+    apply_point_light_internal(base, emission, normal, world_position, uniforms, material_intensity, false, None)
+}
+
+pub(crate) fn apply_point_light_with_normalized_normal(
+    base: Color,
+    emission: Color,
+    normal: Vec3,
+    world_position: Vec3,
+    uniforms: &ShaderUniforms,
+    material_intensity: f32,
+) -> Color {
+    apply_point_light_internal(base, emission, normal, world_position, uniforms, material_intensity, true, None)
 }
 
 pub fn apply_point_light_with_lava(
@@ -99,7 +114,7 @@ pub fn apply_point_light_with_lava(
     material_intensity: f32,
     lava: LavaDiagnostic,
 ) -> Color {
-    apply_point_light_internal(base, emission, normal, world_position, uniforms, material_intensity, Some(lava))
+    apply_point_light_internal(base, emission, normal, world_position, uniforms, material_intensity, false, Some(lava))
 }
 
 fn apply_point_light_internal(
@@ -109,13 +124,14 @@ fn apply_point_light_internal(
     world_position: Vec3,
     uniforms: &ShaderUniforms,
     material_intensity: f32,
+    normal_is_normalized: bool,
     lava: Option<LavaDiagnostic>,
 ) -> Color {
     let light = PointLight::from_uniforms(uniforms);
     let offset = light.position - world_position;
     let distance_squared = offset.length_squared();
     let light_direction = offset.normalized();
-    let normal = normal.normalized();
+    let normal = if normal_is_normalized { normal } else { normal.normalized() };
     let diffuse = normal.dot(light_direction).clamp(0.0, 1.0);
     let intensity = finite_or(light.intensity, 0.0).max(0.0);
     let attenuation = finite_or(light.attenuation, 0.04).max(0.0);

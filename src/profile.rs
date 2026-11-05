@@ -82,6 +82,88 @@ impl ShaderDetailProfile {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
+pub struct ProceduralObjectProfileStats {
+    pub evaluations: u64,
+    pub sampled_evaluations: u64,
+    pub fbm_calls: u64,
+    pub fbm_octaves: u64,
+    pub fbm_samples: u64,
+    pub fbm_ns: u128,
+    pub noise_calls: u64,
+    pub noise_samples: u64,
+    pub noise_ns: u128,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ProceduralDetailStats {
+    pub objects: [ProceduralObjectProfileStats; 11],
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ProceduralDetailState {
+    stats: ProceduralDetailStats,
+    sample_counters: [u64; 11],
+}
+
+#[derive(Clone, Debug)]
+pub struct ProceduralDetailProfile(Rc<RefCell<ProceduralDetailState>>);
+
+impl PartialEq for ProceduralDetailProfile {
+    fn eq(&self, other: &Self) -> bool { Rc::ptr_eq(&self.0, &other.0) }
+}
+
+impl ProceduralDetailProfile {
+    pub fn new() -> Self { Self(Rc::new(RefCell::new(ProceduralDetailState::default()))) }
+
+    pub fn take_frame_snapshot(&self) -> ProceduralDetailStats {
+        let mut state = self.0.borrow_mut();
+        let stats = state.stats;
+        state.stats = ProceduralDetailStats::default();
+        stats
+    }
+
+    pub(crate) fn begin_evaluation(&self, object: DiagnosticObject) -> bool {
+        let mut state = self.0.borrow_mut();
+        let index = object.index();
+        let ordinal = state.sample_counters[index];
+        state.sample_counters[index] = ordinal + 1;
+        let stats = &mut state.stats.objects[index];
+        stats.evaluations += 1;
+        let block = ordinal / 64;
+        let position = ordinal % 64;
+        let mut hash = block
+            .wrapping_add((index as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        hash ^= hash >> 30;
+        hash = hash.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        hash ^= hash >> 27;
+        hash = hash.wrapping_mul(0x94D0_49BB_1331_11EB);
+        hash ^= hash >> 31;
+        let sampled = position == hash % 64;
+        if sampled { stats.sampled_evaluations += 1; }
+        sampled
+    }
+
+    pub(crate) fn add_fbm(&self, object: DiagnosticObject, octaves: u64, sampled: bool, elapsed_ns: u128) {
+        let stats = &mut self.0.borrow_mut().stats.objects[object.index()];
+        stats.fbm_calls += 1;
+        stats.fbm_octaves += octaves;
+        if sampled {
+            stats.fbm_samples += 1;
+            stats.fbm_ns += elapsed_ns;
+        }
+    }
+
+    pub(crate) fn add_noise(&self, object: DiagnosticObject, sampled: bool, elapsed_ns: u128) {
+        let stats = &mut self.0.borrow_mut().stats.objects[object.index()];
+        stats.noise_calls += 1;
+        if sampled {
+            stats.noise_samples += 1;
+            stats.noise_ns += elapsed_ns;
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
 pub struct DetailedProfileStats {
     pub preparation_ns: u128,
     pub preparation_samples: u64,

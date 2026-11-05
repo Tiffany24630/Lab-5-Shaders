@@ -1,7 +1,7 @@
 use crate::color::Color;
 use crate::math::Vec3;
 use crate::procedural::{fbm, noise_3d, smoothstep};
-use crate::shader::{apply_point_light, FragmentInput, FragmentShader, ShaderUniforms};
+use crate::shader::{apply_point_light, apply_point_light_with_normalized_normal, FragmentInput, FragmentShader, ShaderUniforms};
 
 #[derive(Clone, Copy, Debug)]
 pub struct SoleneShader {
@@ -98,14 +98,25 @@ impl FragmentShader for SoleneShader {
 
         let normal = input.normal.normalized();
         let dune_light = 0.88 + 0.12 * dune_value;
-        apply_point_light(
-            scale_color(color, dune_light),
-            Color::BLACK,
-            normal,
-            input.world_position,
-            uniforms,
-            self.light_intensity,
-        )
+        if uniforms.solene_normalized_light {
+            apply_point_light_with_normalized_normal(
+                scale_color(color, dune_light),
+                Color::BLACK,
+                normal,
+                input.world_position,
+                uniforms,
+                self.light_intensity,
+            )
+        } else {
+            apply_point_light(
+                scale_color(color, dune_light),
+                Color::BLACK,
+                normal,
+                input.world_position,
+                uniforms,
+                self.light_intensity,
+            )
+        }
     }
 }
 

@@ -1,4 +1,96 @@
 use crate::math::Vec3;
+use crate::diagnostics::DiagnosticObject;
+use crate::profile::ProceduralDetailProfile;
+use std::cell::RefCell;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Instant;
+
+#[derive(Clone)]
+struct ProceduralScope {
+    profile: ProceduralDetailProfile,
+    object: DiagnosticObject,
+    sampled: bool,
+}
+
+thread_local! {
+    static CURRENT_SCOPE: RefCell<Option<ProceduralScope>> = const { RefCell::new(None) };
+}
+
+static PROCEDURAL_PROFILE_ACTIVE: AtomicBool = AtomicBool::new(false);
+static FBM_PRECOMPUTED_ACTIVE: AtomicBool = AtomicBool::new(false);
+static FBM_COMPARE_ACTIVE: AtomicBool = AtomicBool::new(false);
+static FBM_COMPARE_CALLS: AtomicU64 = AtomicU64::new(0);
+static FBM_COMPARE_MISMATCHES: AtomicU64 = AtomicU64::new(0);
+
+const fn build_fbm_normalization_table() -> [f32; 17] {
+    let mut table = [0.0; 17];
+    let mut octaves = 0;
+    while octaves <= 16 {
+        let mut amplitude: f32 = 0.5;
+        let mut normalization: f32 = 0.0;
+        let mut index = 0;
+        while index < octaves {
+            normalization += amplitude;
+            amplitude *= 0.5;
+            index += 1;
+        }
+        table[octaves] = normalization;
+        octaves += 1;
+    }
+    table
+}
+
+pub const FBM_NORMALIZATION_TABLE: [f32; 17] = build_fbm_normalization_table();
+
+pub fn fbm_normalization_table_matches_original() -> bool {
+    for octaves in 0..=16 {
+        let mut amplitude: f32 = 0.5;
+        let mut normalization: f32 = 0.0;
+        for _ in 0..octaves {
+            normalization += amplitude;
+            amplitude *= 0.5;
+        }
+        if FBM_NORMALIZATION_TABLE[octaves].to_bits() != normalization.to_bits() {
+            return false;
+        }
+    }
+    true
+}
+
+pub fn set_fbm_precomputed(enabled: bool) {
+    FBM_PRECOMPUTED_ACTIVE.store(enabled, Ordering::Relaxed);
+}
+
+pub fn set_fbm_comparison(enabled: bool) {
+    FBM_COMPARE_CALLS.store(0, Ordering::Relaxed);
+    FBM_COMPARE_MISMATCHES.store(0, Ordering::Relaxed);
+    FBM_COMPARE_ACTIVE.store(enabled, Ordering::Relaxed);
+}
+
+pub fn fbm_comparison_stats() -> (u64, u64) {
+    (
+        FBM_COMPARE_CALLS.load(Ordering::Relaxed),
+        FBM_COMPARE_MISMATCHES.load(Ordering::Relaxed),
+    )
+}
+
+pub(crate) struct ProceduralScopeGuard {
+    previous: Option<ProceduralScope>,
+}
+
+pub(crate) fn enter_scope(profile: ProceduralDetailProfile, object: DiagnosticObject) -> ProceduralScopeGuard {
+    let sampled = profile.begin_evaluation(object);
+    let previous = CURRENT_SCOPE.with(|scope| scope.replace(Some(ProceduralScope { profile, object, sampled })));
+    PROCEDURAL_PROFILE_ACTIVE.store(true, Ordering::Relaxed);
+    ProceduralScopeGuard { previous }
+}
+
+impl Drop for ProceduralScopeGuard {
+    fn drop(&mut self) {
+        CURRENT_SCOPE.with(|scope| { scope.replace(self.previous.take()); });
+        PROCEDURAL_PROFILE_ACTIVE.store(false, Ordering::Relaxed);
+    }
+}
 
 pub fn seeded_value(seed: u32, index: u32) -> f32 {
     let mut value = seed.wrapping_add(index.wrapping_mul(0x9E37_79B9));
@@ -47,6 +139,23 @@ fn lattice_hash(x: i32, y: i32, z: i32, seed: u32) -> f32 {
 }
 
 pub fn noise_3d(point: Vec3, seed: u32) -> f32 {
+    if !PROCEDURAL_PROFILE_ACTIVE.load(Ordering::Relaxed) {
+        return noise_3d_impl(point, seed);
+    }
+    let scope = CURRENT_SCOPE.with(|current| current.borrow().clone());
+    let started = scope.as_ref().filter(|scope| scope.sampled).map(|_| Instant::now());
+    let result = noise_3d_impl(point, seed);
+    if let Some(scope) = scope {
+        scope.profile.add_noise(
+            scope.object,
+            scope.sampled,
+            started.map(|start| start.elapsed().as_nanos()).unwrap_or(0),
+        );
+    }
+    result
+}
+
+fn noise_3d_impl(point: Vec3, seed: u32) -> f32 {
     if !point.is_finite() {
         return 0.0;
     }
@@ -81,6 +190,39 @@ pub fn noise_3d(point: Vec3, seed: u32) -> f32 {
 }
 
 pub fn fbm(point: Vec3, seed: u32, octaves: u32) -> f32 {
+    let profiling = PROCEDURAL_PROFILE_ACTIVE.load(Ordering::Relaxed);
+    let comparing = FBM_COMPARE_ACTIVE.load(Ordering::Relaxed);
+    let precomputed = FBM_PRECOMPUTED_ACTIVE.load(Ordering::Relaxed);
+    if !profiling && !comparing && !precomputed {
+        return fbm_impl(point, seed, octaves);
+    }
+    let scope = CURRENT_SCOPE.with(|current| current.borrow().clone());
+    let started = scope.as_ref().filter(|scope| scope.sampled).map(|_| Instant::now());
+    let result = if FBM_COMPARE_ACTIVE.load(Ordering::Relaxed) {
+        let original = fbm_impl(point, seed, octaves);
+        let precomputed = fbm_precomputed_impl(point, seed, octaves);
+        FBM_COMPARE_CALLS.fetch_add(1, Ordering::Relaxed);
+        if original.to_bits() != precomputed.to_bits() {
+            FBM_COMPARE_MISMATCHES.fetch_add(1, Ordering::Relaxed);
+        }
+        original
+    } else if FBM_PRECOMPUTED_ACTIVE.load(Ordering::Relaxed) {
+        fbm_precomputed_impl(point, seed, octaves)
+    } else {
+        fbm_impl(point, seed, octaves)
+    };
+    if let Some(scope) = scope {
+        scope.profile.add_fbm(
+            scope.object,
+            octaves.min(16) as u64,
+            scope.sampled,
+            started.map(|start| start.elapsed().as_nanos()).unwrap_or(0),
+        );
+    }
+    result
+}
+
+fn fbm_impl(point: Vec3, seed: u32, octaves: u32) -> f32 {
     if !point.is_finite() {
         return 0.0;
     }
@@ -94,6 +236,27 @@ pub fn fbm(point: Vec3, seed: u32, octaves: u32) -> f32 {
         frequency *= 2.0;
         amplitude *= 0.5;
     }
+    if normalization <= f32::EPSILON {
+        0.0
+    } else {
+        total / normalization
+    }
+}
+
+fn fbm_precomputed_impl(point: Vec3, seed: u32, octaves: u32) -> f32 {
+    if !point.is_finite() {
+        return 0.0;
+    }
+    let effective_octaves = octaves.min(16);
+    let mut frequency = 1.0;
+    let mut amplitude = 0.5;
+    let mut total = 0.0;
+    for octave in 0..effective_octaves {
+        total += noise_3d(point * frequency, seed.wrapping_add(octave)) * amplitude;
+        frequency *= 2.0;
+        amplitude *= 0.5;
+    }
+    let normalization = FBM_NORMALIZATION_TABLE[effective_octaves as usize];
     if normalization <= f32::EPSILON {
         0.0
     } else {

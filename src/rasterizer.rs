@@ -271,7 +271,16 @@ pub fn rasterize_triangle_with_shader<S: FragmentShader>(
             let raster_shader_started = raster_detail.filter(|_| sampled).map(|_| Instant::now());
             let shader_detail_started = shader_sampled.then(Instant::now);
             let shader_started = uniforms.detail_profile.as_ref().map(|_| Instant::now());
+            let procedural_scope = if let (Some(profile), Some(object)) = (
+                uniforms.procedural_detail_profile.clone(),
+                uniforms.diagnostic_object,
+            ) {
+                Some(crate::procedural::enter_scope(profile, object))
+            } else {
+                None
+            };
             let shaded = shader.shade(&input, uniforms);
+            drop(procedural_scope);
             if let Some(started) = shader_detail_started {
                 shader_samples += 1;
                 shader_ns += started.elapsed().as_nanos();
