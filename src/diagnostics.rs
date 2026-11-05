@@ -37,7 +37,7 @@ impl DiagnosticObject {
         Self::Solene,
     ];
 
-    fn index(self) -> usize {
+    pub(crate) fn index(self) -> usize {
         match self {
             Self::Solaris => 0,
             Self::Vesper => 1,

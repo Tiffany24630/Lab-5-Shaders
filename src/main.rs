@@ -20,7 +20,7 @@ use aetheria::framebuffer::Framebuffer;
 use aetheria::hud::{self, HudState};
 use aetheria::math::{Mat4, Vec3};
 use aetheria::pipeline::render_mesh_with_shader;
-use aetheria::profile::{DetailedProfile, DetailedProfileStats, RasterDetailProfile, RasterDetailStats};
+use aetheria::profile::{DetailedProfile, DetailedProfileStats, RasterDetailProfile, RasterDetailStats, ShaderDetailProfile, ShaderDetailStats};
 use aetheria::orbit_camera::OrbitCameraController;
 use aetheria::scene::{BodyId, BodyPose, BodyPoses};
 use aetheria::shader::ShaderUniforms;
@@ -101,6 +101,7 @@ struct ProfileFrame {
     shadow_triangles_built: u64,
     detail: DetailedProfileStats,
     raster_detail: RasterDetailStats,
+    shader_detail: ShaderDetailStats,
 }
 
 #[cfg(feature = "interactive")]
@@ -179,6 +180,25 @@ impl ProfileWindow {
             println!("  raster_detail measured_ms transform={:.3} clipping={:.3} projection={:.3} bbox={:.3}", raster_ns(|s| s.transform_ns), raster_ns(|s| s.clipping_ns), raster_ns(|s| s.projection_ns), raster_ns(|s| s.bounding_box_ns));
             println!("  raster_detail samples coverage={}/{} interpolation={}/{} depth={}/{} shader={}/{} write={}/{} estimated_ms coverage={:.3} interpolation={:.3} depth={:.3} shader={:.3} write={:.3}", raster_count(|s| s.coverage_samples), raster_count(|s| s.candidate_pixels), raster_count(|s| s.interpolation_samples), raster_count(|s| s.covered_pixels), raster_count(|s| s.depth_samples), raster_count(|s| s.depth_passed), raster_count(|s| s.shader_samples), raster_count(|s| s.shader_evaluations), raster_count(|s| s.write_samples), raster_count(|s| s.written_fragments), raster_ns(|s| s.coverage_ns) * 64.0, raster_ns(|s| s.interpolation_ns) * 64.0, raster_ns(|s| s.depth_ns) * 64.0, raster_ns(|s| s.shader_ns) * 64.0, raster_ns(|s| s.write_ns) * 64.0);
         }
+        let shader_detail_frames = self.samples.iter().filter(|sample| sample.shader_detail.objects.iter().any(|object| object.evaluations > 0)).count();
+        if shader_detail_frames > 0 {
+            println!("  shader_detail frames={shader_detail_frames}/{} sample_rate=continuous_stratified_one_of_64_per_object; extrapolation=window_ns*window_evaluations/window_samples", self.samples.len());
+            for (index, object) in DiagnosticObject::ALL.into_iter().enumerate() {
+                let stats = self.samples.iter().fold((0u64, 0u64, 0u64, 0u128, 0usize, 0usize), |acc, sample| {
+                    let item = sample.shader_detail.objects[index];
+                    let evaluated = usize::from(item.evaluations > 0);
+                    (acc.0 + item.depth_passed, acc.1 + item.evaluations, acc.2 + item.samples, acc.3 + item.shader_ns, acc.4 + evaluated, acc.5 + usize::from(item.evaluations == 0))
+                });
+                if stats.1 == 0 {
+                    println!("    {} depth_passed=0 evaluations=0 samples=0", object.name());
+                } else {
+                    let estimated_ms = if stats.2 == 0 { 0.0 } else { stats.3 as f64 / 1_000_000.0 * stats.1 as f64 / stats.2 as f64 };
+                    let avg_us = estimated_ms * 1000.0 / stats.1 as f64;
+                    let factor = stats.1 as f64 / stats.2.max(1) as f64;
+                    println!("    {} depth_passed={} evaluations={} samples={} factor={:.3} sampled_ms={:.3} evaluated_frames={} frames_without_evaluations={} estimated_shader_ms={:.3} estimated_us_per_eval={:.3}", object.name(), stats.0, stats.1, stats.2, factor, stats.3 as f64 / 1_000_000.0, stats.4, stats.5, estimated_ms, avg_us);
+                }
+            }
+        }
         let bvh_frames = self.samples.iter().filter(|sample| sample.bvh_nodes > 0).count();
         if bvh_frames > 0 {
             println!("  bvh_structure frames={bvh_frames} nodes_avg={:.1} triangles_avg={:.1} build_depth_max={}", average(|sample| sample.bvh_nodes as f64), average(|sample| sample.bvh_triangles as f64), self.samples.iter().map(|s| s.bvh_depth).max().unwrap_or(0));
@@ -196,6 +216,7 @@ fn main() -> io::Result<()> {
     let mut profile = false;
     let mut profile_detail = false;
     let mut profile_raster_detail = false;
+    let mut profile_shader_detail = false;
     let mut shadow_bvh = true;
     let mut shadow_bvh_explicit = false;
     let mut shadow_brute_force = false;
@@ -221,6 +242,10 @@ fn main() -> io::Result<()> {
                 profile = true;
                 profile_raster_detail = true;
             }
+            "--profile-shader-detail" => {
+                profile = true;
+                profile_shader_detail = true;
+            }
             "--shadow-bvh" => {
                 shadow_bvh = true;
                 shadow_bvh_explicit = true;
@@ -240,7 +265,7 @@ fn main() -> io::Result<()> {
                 diagnostics = true;
             }
             _ => {
-                eprintln!("Uso: aetheria [--offline] [--interactive] [--diagnostics] [--diagnostics-only] [--preview original|A|B|C] [--profile] [--profile-detail] [--profile-raster-detail] [--shadow-bvh] [--shadow-brute-force] [--shadow-compare] [--shadow-compare-all]");
+                eprintln!("Uso: aetheria [--offline] [--interactive] [--diagnostics] [--diagnostics-only] [--preview original|A|B|C] [--profile] [--profile-detail] [--profile-raster-detail] [--profile-shader-detail] [--shadow-bvh] [--shadow-brute-force] [--shadow-compare] [--shadow-compare-all]");
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "argumento desconocido"));
             }
         }
@@ -260,7 +285,7 @@ fn main() -> io::Result<()> {
     if interactive {
         #[cfg(feature = "interactive")]
         {
-            return run_app(true, diagnostics, diagnostics_only, preview, profile, profile_detail, profile_raster_detail, shadow_bvh, shadow_compare, shadow_compare_all);
+            return run_app(true, diagnostics, diagnostics_only, preview, profile, profile_detail, profile_raster_detail, profile_shader_detail, shadow_bvh, shadow_compare, shadow_compare_all);
         }
         #[cfg(not(feature = "interactive"))]
         {
@@ -268,16 +293,18 @@ fn main() -> io::Result<()> {
             return Err(io::Error::new(io::ErrorKind::Unsupported, "feature interactive no habilitada"));
         }
     }
-    run_app(false, diagnostics, diagnostics_only, preview, profile, profile_detail, profile_raster_detail, shadow_bvh, shadow_compare, shadow_compare_all)
+    run_app(false, diagnostics, diagnostics_only, preview, profile, profile_detail, profile_raster_detail, profile_shader_detail, shadow_bvh, shadow_compare, shadow_compare_all)
 }
 
-fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool, preview: Option<PreviewCurve>, profile_enabled: bool, profile_detail: bool, profile_raster_detail: bool, shadow_bvh: bool, shadow_compare: bool, shadow_compare_all: bool) -> io::Result<()> {
+fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool, preview: Option<PreviewCurve>, profile_enabled: bool, profile_detail: bool, profile_raster_detail: bool, profile_shader_detail: bool, shadow_bvh: bool, shadow_compare: bool, shadow_compare_all: bool) -> io::Result<()> {
     #[cfg(not(feature = "interactive"))]
     let _ = profile_enabled;
     #[cfg(not(feature = "interactive"))]
     let _ = profile_detail;
     #[cfg(not(feature = "interactive"))]
     let _ = profile_raster_detail;
+    #[cfg(not(feature = "interactive"))]
+    let _ = profile_shader_detail;
     #[cfg(not(feature = "interactive"))]
     let _ = shadow_bvh;
     #[cfg(not(feature = "interactive"))]
@@ -366,7 +393,7 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
         let mut framebuffer = render_frame(
             clock.time(), &interactive_camera, &solaris, &vesper, &selene, &nymara,
             &ring_inner, &ring_middle, &ring_outer, &cryon, &veridis, &umbra,
-            &solene, poses, &shadow_scene, Some(&background_colors), diagnostics_enabled, None, None, None, None,
+            &solene, poses, &shadow_scene, Some(&background_colors), diagnostics_enabled, None, None, None, None, None,
         )?;
         let mut clean_colors = framebuffer.color_buffer().to_vec();
         hud::draw(&mut framebuffer, HudState {
@@ -384,6 +411,7 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
         let mut previous_mouse = None;
         let mut last_tick = Instant::now();
         let mut profiler = profile_enabled.then(ProfileWindow::new);
+        let shader_detail_profile = profile_shader_detail.then(ShaderDetailProfile::new);
         while window.is_open() {
             let frame_start = Instant::now();
             let mut profile_frame = ProfileFrame::default();
@@ -526,13 +554,16 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
                 let updated = render_frame(
                     clock.time(), &current_camera, &solaris, &vesper, &selene, &nymara,
                     &ring_inner, &ring_middle, &ring_outer, &cryon, &veridis, &umbra,
-                    &solene, poses, &shadow_scene, Some(&background_colors), diagnostics_enabled, None, detail_profile.clone(), raster_detail_profile.clone(), Some(&mut profile_frame),
+                    &solene, poses, &shadow_scene, Some(&background_colors), diagnostics_enabled, None, detail_profile.clone(), raster_detail_profile.clone(), shader_detail_profile.clone(), Some(&mut profile_frame),
                 )?;
                 if let Some(detail_profile) = detail_profile {
                     profile_frame.detail = detail_profile.snapshot();
                 }
                 if let Some(raster_detail_profile) = raster_detail_profile {
                     profile_frame.raster_detail = raster_detail_profile.snapshot();
+                }
+                if let Some(shader_detail_profile) = &shader_detail_profile {
+                    profile_frame.shader_detail = shader_detail_profile.take_frame_snapshot();
                 }
                 framebuffer = updated;
                 clean_colors = framebuffer.color_buffer().to_vec();
@@ -621,7 +652,7 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
         let framebuffer = render_frame(
             time, &frame_camera, &solaris, &vesper, &selene, &nymara,
             &ring_inner, &ring_middle, &ring_outer, &cryon, &veridis, &umbra, &solene,
-            poses, &shadow_scene, None, diagnostics_enabled, preview.and_then(PreviewCurve::parameters), None, None, None,
+            poses, &shadow_scene, None, diagnostics_enabled, preview.and_then(PreviewCurve::parameters), None, None, None, None,
         )?;
         if !diagnostics_only {
             fs::create_dir_all("output")?;
@@ -775,6 +806,7 @@ fn render_frame(
     vesper_emission_curve: Option<(f32, f32)>,
     detail_profile: Option<DetailedProfile>,
     raster_detail_profile: Option<RasterDetailProfile>,
+    shader_detail_profile: Option<ShaderDetailProfile>,
     mut profile_frame: Option<&mut ProfileFrame>,
 ) -> io::Result<Framebuffer> {
     let solaris_model = poses.get(BodyId::Solaris).model_matrix;
@@ -796,6 +828,7 @@ fn render_frame(
         vesper_emission_curve,
         detail_profile,
         raster_detail_profile,
+        shader_detail_profile,
         ..ShaderUniforms::default()
     };
     let framebuffer_setup_start = Instant::now();

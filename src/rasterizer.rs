@@ -105,6 +105,10 @@ pub fn rasterize_triangle_with_shader<S: FragmentShader>(
     uniforms: &ShaderUniforms,
 ) -> usize {
     let raster_detail = uniforms.raster_detail_profile.as_ref();
+    let shader_detail = uniforms.shader_detail_profile.as_ref();
+    let mut shader_evaluations = 0u64;
+    let mut shader_samples = 0u64;
+    let mut shader_ns = 0u128;
     let mut counters = RasterTriangleCounters::default();
     if vertices.iter().any(|vertex| {
         !vertex.x.is_finite()
@@ -258,9 +262,20 @@ pub fn rasterize_triangle_with_shader<S: FragmentShader>(
                 profile.add_raster(sample);
             }
             counters.shader_evaluations += 1;
+            shader_evaluations += 1;
+            let shader_sampled = if let (Some(profile), Some(object)) = (shader_detail, uniforms.diagnostic_object) {
+                profile.should_sample(object)
+            } else {
+                false
+            };
             let raster_shader_started = raster_detail.filter(|_| sampled).map(|_| Instant::now());
+            let shader_detail_started = shader_sampled.then(Instant::now);
             let shader_started = uniforms.detail_profile.as_ref().map(|_| Instant::now());
             let shaded = shader.shade(&input, uniforms);
+            if let Some(started) = shader_detail_started {
+                shader_samples += 1;
+                shader_ns += started.elapsed().as_nanos();
+            }
             if let (Some(profile), Some(started)) = (raster_detail, raster_shader_started) {
                 let mut sample = RasterTriangleCounters::default();
                 sample.shader_samples = 1;
@@ -291,6 +306,9 @@ pub fn rasterize_triangle_with_shader<S: FragmentShader>(
                 written += 1;
             }
         }
+    }
+    if let (Some(profile), Some(object)) = (shader_detail, uniforms.diagnostic_object) {
+        profile.add(object, counters.depth_passed, shader_evaluations, shader_samples, shader_ns);
     }
     if let Some(profile) = raster_detail { profile.add_raster(counters); }
     written

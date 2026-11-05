@@ -1,6 +1,85 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
+use crate::diagnostics::DiagnosticObject;
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ShaderObjectProfileStats {
+    pub depth_passed: u64,
+    pub evaluations: u64,
+    pub samples: u64,
+    pub shader_ns: u128,
+    pub estimated_shader_ns: u128,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ShaderDetailStats {
+    pub objects: [ShaderObjectProfileStats; 11],
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ShaderDetailState {
+    stats: ShaderDetailStats,
+    sample_counters: [u64; 11],
+}
+
+#[derive(Clone, Debug)]
+pub struct ShaderDetailProfile(Rc<RefCell<ShaderDetailState>>);
+
+impl PartialEq for ShaderDetailProfile {
+    fn eq(&self, other: &Self) -> bool { Rc::ptr_eq(&self.0, &other.0) }
+}
+
+impl ShaderDetailProfile {
+    pub fn new() -> Self { Self(Rc::new(RefCell::new(ShaderDetailState::default()))) }
+    pub fn snapshot(&self) -> ShaderDetailStats {
+        let mut stats = self.0.borrow().stats;
+        for object in &mut stats.objects {
+            object.estimated_shader_ns = if object.samples == 0 {
+                0
+            } else {
+                object.shader_ns.saturating_mul(object.evaluations as u128) / object.samples as u128
+            };
+        }
+        stats
+    }
+    pub fn take_frame_snapshot(&self) -> ShaderDetailStats {
+        let mut state = self.0.borrow_mut();
+        let mut stats = state.stats;
+        state.stats = ShaderDetailStats::default();
+        for object in &mut stats.objects {
+            object.estimated_shader_ns = if object.samples == 0 {
+                0
+            } else {
+                object.shader_ns.saturating_mul(object.evaluations as u128) / object.samples as u128
+            };
+        }
+        stats
+    }
+    pub fn should_sample(&self, object: DiagnosticObject) -> bool {
+        let state = &mut *self.0.borrow_mut();
+        let counter = &mut state.sample_counters[object.index()];
+        let ordinal = *counter;
+        *counter += 1;
+        let block = ordinal / 64;
+        let position = ordinal % 64;
+        let mut hash = block
+            .wrapping_add((object.index() as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        hash ^= hash >> 30;
+        hash = hash.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        hash ^= hash >> 27;
+        hash = hash.wrapping_mul(0x94D0_49BB_1331_11EB);
+        hash ^= hash >> 31;
+        position == hash % 64
+    }
+    pub fn add(&self, object: DiagnosticObject, depth_passed: u64, evaluations: u64, samples: u64, shader_ns: u128) {
+        let stats = &mut self.0.borrow_mut().stats.objects[object.index()];
+        stats.depth_passed += depth_passed;
+        stats.evaluations += evaluations;
+        stats.samples += samples;
+        stats.shader_ns += shader_ns;
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DetailedProfileStats {
