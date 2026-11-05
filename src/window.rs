@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use minifb::{Key, Window, WindowOptions};
+use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
 
 use crate::framebuffer::Framebuffer;
 
@@ -28,6 +28,26 @@ impl CpuWindow {
         self.window
             .update_with_buffer(&self.pixels, self.width, self.height)
             .map_err(|error| error.to_string())
+    }
+
+    pub fn set_framebuffer(&mut self, framebuffer: &Framebuffer) {
+        self.pixels = framebuffer_to_window_pixels(framebuffer);
+    }
+
+    pub fn mouse_position(&self) -> Option<(f32, f32)> {
+        self.window.get_mouse_pos(MouseMode::Clamp)
+    }
+
+    pub fn left_mouse_down(&self) -> bool {
+        self.window.get_mouse_down(MouseButton::Left)
+    }
+
+    pub fn scroll_wheel(&self) -> Option<(f32, f32)> {
+        self.window.get_scroll_wheel()
+    }
+
+    pub fn pressed_keys(&self) -> Vec<Key> {
+        self.window.get_keys_pressed(KeyRepeat::No)
     }
 
     pub fn run_until_closed(&mut self) -> Result<(), String> {
