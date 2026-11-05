@@ -1,4 +1,5 @@
 use crate::color::Color;
+use crate::diagnostics::DiagnosticSample;
 use crate::math::Vec3;
 use crate::procedural::{fbm, noise_3d, smoothstep};
 use crate::shader::{FragmentInput, FragmentShader, ShaderUniforms};
@@ -72,7 +73,25 @@ impl FragmentShader for SolarisShader {
         let r = 1.0 - (-base.r * intensity).exp();
         let g = 1.0 - (-base.g * intensity).exp();
         let b = 1.0 - (-base.b * intensity).exp();
-        Color::new(r, g, b)
+        if uniforms.diagnostics.is_none() || uniforms.diagnostic_object.is_none() {
+            return Color::new(r, g, b);
+        }
+        let raw_emission = Color::new_const(r, g, b);
+        let display_color = Color::new(r, g, b);
+        let handle = uniforms.diagnostics.as_ref().expect("diagnostics checked above");
+        let object = uniforms.diagnostic_object.expect("object checked above");
+        handle.record(object, DiagnosticSample {
+            albedo: base,
+            emission: raw_emission,
+            ambient_component: Color::BLACK,
+            direct_component: Color::BLACK,
+            material_pre_emission: raw_emission,
+            combined_pre_clamp: raw_emission,
+            display_color,
+            shadow_visibility: None,
+            material_intensity: 0.0,
+        });
+        display_color
     }
 }
 

@@ -12,6 +12,7 @@ use aetheria::animation::SimulationClock;
 use aetheria::assets::load_obj;
 use aetheria::camera::Camera;
 use aetheria::color::Color;
+use aetheria::diagnostics::{DiagnosticObject, DiagnosticsHandle};
 use aetheria::framebuffer::Framebuffer;
 #[cfg(feature = "interactive")]
 use aetheria::hud::{self, HudState};
@@ -38,12 +39,14 @@ use minifb::Key;
 
 fn main() -> io::Result<()> {
     let mut interactive = false;
+    let mut diagnostics = false;
     for argument in env::args().skip(1) {
         match argument.as_str() {
             "--offline" => {}
             "--interactive" => interactive = true,
+            "--diagnostics" => diagnostics = true,
             _ => {
-                eprintln!("Uso: aetheria [--offline] [--interactive]");
+                eprintln!("Uso: aetheria [--offline] [--interactive] [--diagnostics]");
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "argumento desconocido"));
             }
         }
@@ -51,7 +54,7 @@ fn main() -> io::Result<()> {
     if interactive {
         #[cfg(feature = "interactive")]
         {
-            return run_app(true);
+            return run_app(true, diagnostics);
         }
         #[cfg(not(feature = "interactive"))]
         {
@@ -59,10 +62,10 @@ fn main() -> io::Result<()> {
             return Err(io::Error::new(io::ErrorKind::Unsupported, "feature interactive no habilitada"));
         }
     }
-    run_app(false)
+    run_app(false, diagnostics)
 }
 
-fn run_app(_interactive: bool) -> io::Result<()> {
+fn run_app(_interactive: bool, diagnostics_enabled: bool) -> io::Result<()> {
     let solaris = load_obj("assets/models/obj/solaris.obj").map_err(io::Error::other)?;
     let vesper = load_obj("assets/models/obj/vesper.obj").map_err(io::Error::other)?;
     let selene = load_obj("assets/models/obj/selene.obj").map_err(io::Error::other)?;
@@ -145,7 +148,7 @@ fn run_app(_interactive: bool) -> io::Result<()> {
         let mut framebuffer = render_frame(
             clock.time(), &interactive_camera, &solaris, &vesper, &selene, &nymara,
             &ring_inner, &ring_middle, &ring_outer, &cryon, &veridis, &umbra,
-            &solene, poses, &shadow_scene, Some(&background_colors),
+            &solene, poses, &shadow_scene, Some(&background_colors), diagnostics_enabled,
         )?;
         let mut clean_colors = framebuffer.color_buffer().to_vec();
         hud::draw(&mut framebuffer, HudState {
@@ -283,7 +286,7 @@ fn run_app(_interactive: bool) -> io::Result<()> {
                 let updated = render_frame(
                     clock.time(), &current_camera, &solaris, &vesper, &selene, &nymara,
                     &ring_inner, &ring_middle, &ring_outer, &cryon, &veridis, &umbra,
-                    &solene, poses, &shadow_scene, Some(&background_colors),
+                    &solene, poses, &shadow_scene, Some(&background_colors), diagnostics_enabled,
                 )?;
                 framebuffer = updated;
                 clean_colors = framebuffer.color_buffer().to_vec();
@@ -337,7 +340,7 @@ fn run_app(_interactive: bool) -> io::Result<()> {
         let framebuffer = render_frame(
             time, &frame_camera, &solaris, &vesper, &selene, &nymara,
             &ring_inner, &ring_middle, &ring_outer, &cryon, &veridis, &umbra, &solene,
-            poses, &shadow_scene, None,
+            poses, &shadow_scene, None, diagnostics_enabled,
         )?;
         fs::create_dir_all("output")?;
         framebuffer.save_ppm(output)?;
@@ -465,6 +468,7 @@ fn render_frame(
     solene: &aetheria::assets::ObjAsset, poses: BodyPoses,
     shadow_scene: &Arc<ShadowScene>,
     background_colors: Option<&[Color]>,
+    diagnostics_enabled: bool,
 ) -> io::Result<Framebuffer> {
     let solaris_model = poses.get(BodyId::Solaris).model_matrix;
     let vesper_model = poses.get(BodyId::Vesper).model_matrix;
@@ -475,12 +479,14 @@ fn render_frame(
     let umbra_model = poses.get(BodyId::Umbra).model_matrix;
     let solene_model = poses.get(BodyId::Solene).model_matrix;
 
+    let diagnostics = diagnostics_enabled.then(DiagnosticsHandle::new);
     let uniforms = ShaderUniforms {
         time, camera_position: camera.position,
         light_position: solaris_model.transform_point(Vec3::ZERO),
         light_color: Color::new_const(1.0, 0.86, 0.68), light_intensity: 1.8,
         light_attenuation: 0.04, ambient_light: 0.10,
-        shadow_scene: Some(shadow_scene.clone()), ..ShaderUniforms::default()
+        shadow_scene: Some(shadow_scene.clone()), diagnostics: diagnostics.clone(),
+        ..ShaderUniforms::default()
     };
     let mut framebuffer = Framebuffer::new(800, 600).map_err(io::Error::other)?;
     framebuffer.clear(Color::new(0.003, 0.004, 0.010));
@@ -503,25 +509,30 @@ fn render_frame(
     let ring_outer_shader = NymaraRingShader::new(Color::new_const(0.26, 0.42, 0.54), 0.66, 37);
 
     let render_start = Instant::now();
-    let mut render = |receiver: u32, mesh: &aetheria::geometry::Mesh, model: Mat4,
+    let mut render = |receiver: u32, object: DiagnosticObject,
+                      mesh: &aetheria::geometry::Mesh, model: Mat4,
                       shader: &dyn RenderableShader| {
         let mut object_uniforms = uniforms.clone();
         object_uniforms.shadow_receiver = receiver;
+        object_uniforms.diagnostic_object = Some(object);
         shader.render(&mut framebuffer, mesh, model, camera, &object_uniforms);
     };
-    render(u32::MAX, &solaris.mesh, solaris_model, &solaris_shader);
-    render(1, &vesper.mesh, vesper_model, &vesper_shader);
-    render(2, &selene.mesh, selene_model, &selene_shader);
-    render(3, &nymara.mesh, nymara_model, &nymara_shader);
-    render(4, &ring_inner.mesh, nymara_model, &ring_inner_shader);
-    render(5, &ring_middle.mesh, nymara_model, &ring_middle_shader);
-    render(6, &ring_outer.mesh, nymara_model, &ring_outer_shader);
-    render(7, &cryon.mesh, cryon_model, &cryon_shader);
-    render(8, &veridis.mesh, veridis_model, &veridis_shader);
-    render(9, &umbra.mesh, umbra_model, &umbra_shader);
-    render(10, &solene.mesh, solene_model, &solene_shader);
+    render(u32::MAX, DiagnosticObject::Solaris, &solaris.mesh, solaris_model, &solaris_shader);
+    render(1, DiagnosticObject::Vesper, &vesper.mesh, vesper_model, &vesper_shader);
+    render(2, DiagnosticObject::Selene, &selene.mesh, selene_model, &selene_shader);
+    render(3, DiagnosticObject::Nymara, &nymara.mesh, nymara_model, &nymara_shader);
+    render(4, DiagnosticObject::RingInner, &ring_inner.mesh, nymara_model, &ring_inner_shader);
+    render(5, DiagnosticObject::RingMiddle, &ring_middle.mesh, nymara_model, &ring_middle_shader);
+    render(6, DiagnosticObject::RingOuter, &ring_outer.mesh, nymara_model, &ring_outer_shader);
+    render(7, DiagnosticObject::Cryon, &cryon.mesh, cryon_model, &cryon_shader);
+    render(8, DiagnosticObject::Veridis, &veridis.mesh, veridis_model, &veridis_shader);
+    render(9, DiagnosticObject::Umbra, &umbra.mesh, umbra_model, &umbra_shader);
+    render(10, DiagnosticObject::Solene, &solene.mesh, solene_model, &solene_shader);
 
     println!("Rendered t={time:.2}; {} shadow triangles; {:?}", shadow_scene.triangle_count(), render_start.elapsed());
+    if let Some(diagnostics) = diagnostics {
+        println!("{}", diagnostics.report());
+    }
     Ok(framebuffer)
 }
 

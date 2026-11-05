@@ -2,6 +2,7 @@ pub mod assets;
 pub mod animation;
 pub mod camera;
 pub mod color;
+pub mod diagnostics;
 pub mod framebuffer;
 pub mod geometry;
 pub mod hud;

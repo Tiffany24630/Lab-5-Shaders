@@ -1,4 +1,5 @@
 use crate::color::Color;
+use crate::diagnostics::{DiagnosticObject, DiagnosticSample, DiagnosticsHandle};
 use crate::math::{Vec2, Vec3};
 use std::sync::Arc;
 
@@ -24,6 +25,8 @@ pub struct ShaderUniforms {
     pub ambient_light: f32,
     pub shadow_scene: Option<Arc<crate::shadows::ShadowScene>>,
     pub shadow_receiver: u32,
+    pub diagnostics: Option<DiagnosticsHandle>,
+    pub diagnostic_object: Option<DiagnosticObject>,
     pub parameters: [f32; 8],
 }
 
@@ -39,6 +42,8 @@ impl Default for ShaderUniforms {
             ambient_light: 0.10,
             shadow_scene: None,
             shadow_receiver: u32::MAX,
+            diagnostics: None,
+            diagnostic_object: None,
             parameters: [0.0; 8],
         }
     }
@@ -105,11 +110,57 @@ pub fn apply_point_light(
         .unwrap_or(1.0);
     let diffuse_factor = diffuse * intensity * distance_factor * material_intensity * visibility;
     let light_color = light.color;
-    Color::new(
-        base.r * (ambient + diffuse_factor * light_color.r) + emission.r,
-        base.g * (ambient + diffuse_factor * light_color.g) + emission.g,
-        base.b * (ambient + diffuse_factor * light_color.b) + emission.b,
-    )
+    let Some(handle) = uniforms.diagnostics.as_ref() else {
+        return Color::new(
+            base.r * (ambient + diffuse_factor * light_color.r) + emission.r,
+            base.g * (ambient + diffuse_factor * light_color.g) + emission.g,
+            base.b * (ambient + diffuse_factor * light_color.b) + emission.b,
+        );
+    };
+    let Some(object) = uniforms.diagnostic_object else {
+        return Color::new(
+            base.r * (ambient + diffuse_factor * light_color.r) + emission.r,
+            base.g * (ambient + diffuse_factor * light_color.g) + emission.g,
+            base.b * (ambient + diffuse_factor * light_color.b) + emission.b,
+        );
+    };
+    let ambient_component = Color::new_const(
+        base.r * ambient,
+        base.g * ambient,
+        base.b * ambient,
+    );
+    let direct_component = Color::new_const(
+        base.r * diffuse_factor * light_color.r,
+        base.g * diffuse_factor * light_color.g,
+        base.b * diffuse_factor * light_color.b,
+    );
+    let material_pre_emission = Color::new_const(
+        base.r * (ambient + diffuse_factor * light_color.r),
+        base.g * (ambient + diffuse_factor * light_color.g),
+        base.b * (ambient + diffuse_factor * light_color.b),
+    );
+    let combined_pre_clamp = Color::new_const(
+        material_pre_emission.r + emission.r,
+        material_pre_emission.g + emission.g,
+        material_pre_emission.b + emission.b,
+    );
+    let display_color = Color::new(
+        combined_pre_clamp.r,
+        combined_pre_clamp.g,
+        combined_pre_clamp.b,
+    );
+    handle.record(object, DiagnosticSample {
+        albedo: base,
+        emission,
+        ambient_component,
+        direct_component,
+        material_pre_emission,
+        combined_pre_clamp,
+        display_color,
+        shadow_visibility: Some(visibility),
+        material_intensity,
+    });
+    display_color
 }
 
 fn finite_or(value: f32, fallback: f32) -> f32 {
