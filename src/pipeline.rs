@@ -5,6 +5,7 @@ use crate::geometry::{Mesh, Triangle3D};
 use crate::math::{Mat4, Vec2, Vec3, Vec4};
 use crate::rasterizer::{PerspectiveRasterVertex, rasterize_triangle_with_shader};
 use crate::shader::{FragmentShader, ShaderUniforms, VertexColorShader};
+use std::time::Instant;
 
 const CLIP_EPSILON: f32 = 1.0e-6;
 
@@ -24,6 +25,7 @@ pub fn render_mesh(
     model: Mat4,
     camera: &Camera,
 ) -> usize {
+    let preparation_started = uniforms.detail_profile.as_ref().map(|_| Instant::now());
     render_mesh_with_shader(
         framebuffer,
         mesh,
@@ -96,7 +98,14 @@ pub fn render_triangle_with_shader<S: FragmentShader>(
         else {
             continue;
         };
+        if let (Some(profile), Some(preparation_started)) = (&uniforms.detail_profile, preparation_started.as_ref()) {
+            profile.add_preparation(preparation_started.elapsed());
+        }
+        let raster_started = uniforms.detail_profile.as_ref().map(|_| Instant::now());
         written += rasterize_triangle_with_shader(framebuffer, projected, shader, uniforms);
+        if let (Some(profile), Some(raster_started)) = (&uniforms.detail_profile, raster_started) {
+            profile.add_raster(raster_started.elapsed());
+        }
     }
     written
 }

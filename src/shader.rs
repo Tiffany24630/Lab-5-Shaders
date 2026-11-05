@@ -1,6 +1,7 @@
 use crate::color::Color;
 use crate::diagnostics::{DiagnosticObject, DiagnosticSample, DiagnosticsHandle, LavaDiagnostic};
 use crate::math::{Vec2, Vec3};
+use crate::profile::DetailedProfile;
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -27,6 +28,8 @@ pub struct ShaderUniforms {
     pub shadow_receiver: u32,
     pub diagnostics: Option<DiagnosticsHandle>,
     pub diagnostic_object: Option<DiagnosticObject>,
+    pub vesper_emission_curve: Option<(f32, f32)>,
+    pub detail_profile: Option<DetailedProfile>,
     pub parameters: [f32; 8],
 }
 
@@ -44,6 +47,8 @@ impl Default for ShaderUniforms {
             shadow_receiver: u32::MAX,
             diagnostics: None,
             diagnostic_object: None,
+            vesper_emission_curve: None,
+            detail_profile: None,
             parameters: [0.0; 8],
         }
     }
@@ -125,6 +130,7 @@ fn apply_point_light_internal(
                 world_position,
                 light.position,
                 uniforms.shadow_receiver,
+                uniforms.detail_profile.as_ref(),
             ) {
                 0.0
             } else {

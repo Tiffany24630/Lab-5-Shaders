@@ -4,6 +4,8 @@ use std::sync::Arc;
 use std::time::Instant;
 #[cfg(feature = "interactive")]
 use std::time::Duration;
+#[cfg(feature = "interactive")]
+use std::collections::VecDeque;
 use std::env;
 
 use aetheria::animation::{BodyMotion, Orbit, RotationAxis};
@@ -37,11 +39,127 @@ use aetheria::window::CpuWindow;
 #[cfg(feature = "interactive")]
 use minifb::Key;
 
+#[derive(Clone, Copy, Debug)]
+enum PreviewCurve {
+    Original,
+    A,
+    B,
+    C,
+}
+
+impl PreviewCurve {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "original" => Some(Self::Original),
+            "A" => Some(Self::A),
+            "B" => Some(Self::B),
+            "C" => Some(Self::C),
+            _ => None,
+        }
+    }
+
+    fn parameters(self) -> Option<(f32, f32)> {
+        match self {
+            Self::Original => None,
+            Self::A => Some((0.50, 0.90)),
+            Self::B => Some((0.50, 0.80)),
+            Self::C => Some((0.50, 0.70)),
+        }
+    }
+
+    fn output_path(self) -> &'static str {
+        match self {
+            Self::Original => "output/phase21p_vesper_original.ppm",
+            Self::A => "output/phase21p_vesper_A.ppm",
+            Self::B => "output/phase21p_vesper_B.ppm",
+            Self::C => "output/phase21p_vesper_C.ppm",
+        }
+    }
+}
+
+#[cfg_attr(not(feature = "interactive"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, Default)]
+struct ProfileFrame {
+    total_ms: f64,
+    update_ms: f64,
+    poses_ms: f64,
+    shadows_ms: f64,
+    background_ms: f64,
+    framebuffer_ms: f64,
+    geometry_ms: f64,
+    hud_ms: f64,
+    conversion_ms: f64,
+    present_ms: f64,
+    wait_ms: f64,
+}
+
+#[cfg(feature = "interactive")]
+struct ProfileWindow {
+    samples: VecDeque<ProfileFrame>,
+    capacity: usize,
+    last_report: Instant,
+}
+
+#[cfg(feature = "interactive")]
+impl ProfileWindow {
+    fn new() -> Self {
+        Self { samples: VecDeque::with_capacity(120), capacity: 120, last_report: Instant::now() }
+    }
+
+    fn record(&mut self, sample: ProfileFrame) {
+        if self.samples.len() == self.capacity { self.samples.pop_front(); }
+        self.samples.push_back(sample);
+        if self.last_report.elapsed() >= Duration::from_secs(1) {
+            self.report();
+            self.last_report = Instant::now();
+        }
+    }
+
+    fn report(&self) {
+        if self.samples.is_empty() { return; }
+        let values = |f: fn(ProfileFrame) -> f64| -> Vec<f64> {
+            let mut values: Vec<f64> = self.samples.iter().copied().map(f).collect();
+            values.sort_by(f64::total_cmp);
+            values
+        };
+        let percentile = |values: &[f64], p: f64| -> f64 {
+            let index = ((values.len() - 1) as f64 * p).round() as usize;
+            values[index]
+        };
+        let average = |f: fn(ProfileFrame) -> f64| -> f64 {
+            self.samples.iter().map(|sample| f(*sample)).sum::<f64>() / self.samples.len() as f64
+        };
+        let total_values = values(|sample| sample.total_ms);
+        let total_avg = average(|sample| sample.total_ms).max(f64::EPSILON);
+        let stage = |name: &str, f: fn(ProfileFrame) -> f64| {
+            let samples = self.samples.iter().filter(|sample| f(**sample) > 0.0).count();
+            let avg = average(f);
+            let pct = avg * 100.0 / total_avg;
+            println!("  {name}: avg={avg:.3} ms ({pct:.1}%), samples={samples}/{}", self.samples.len());
+        };
+        println!("[PROFILE] frames={} fps={:.2} frame_ms avg={:.3} min={:.3} max={:.3} p50={:.3} p95={:.3} p99={:.3}",
+            self.samples.len(), 1000.0 / total_avg, total_avg, total_values[0], *total_values.last().unwrap(), percentile(&total_values, 0.50), percentile(&total_values, 0.95), percentile(&total_values, 0.99));
+        stage("update/input+clock", |sample| sample.update_ms);
+        stage("poses", |sample| sample.poses_ms);
+        stage("shadow_scene", |sample| sample.shadows_ms);
+        stage("background_generated", |sample| sample.background_ms);
+        stage("framebuffer_setup", |sample| sample.framebuffer_ms);
+        stage("geometry+raster+shaders+depth", |sample| sample.geometry_ms);
+        stage("hud/restore", |sample| sample.hud_ms);
+        stage("rgb8_conversion", |sample| sample.conversion_ms);
+        stage("present", |sample| sample.present_ms);
+        stage("explicit_wait", |sample| sample.wait_ms);
+    }
+}
+
 fn main() -> io::Result<()> {
     let mut interactive = false;
     let mut diagnostics = false;
     let mut diagnostics_only = false;
-    for argument in env::args().skip(1) {
+    let mut profile = false;
+    let mut preview = None;
+    let mut arguments = env::args().skip(1);
+    while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--offline" => {}
             "--interactive" => interactive = true,
@@ -50,22 +168,28 @@ fn main() -> io::Result<()> {
                 diagnostics = true;
                 diagnostics_only = true;
             }
+            "--profile" => profile = true,
+            "--preview" => {
+                let value = arguments.next().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "--preview requiere original, A, B o C"))?;
+                preview = Some(PreviewCurve::parse(&value).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "preview invalido: use original, A, B o C"))?);
+                diagnostics = true;
+            }
             _ => {
-                eprintln!("Uso: aetheria [--offline] [--interactive] [--diagnostics] [--diagnostics-only]");
+                eprintln!("Uso: aetheria [--offline] [--interactive] [--diagnostics] [--diagnostics-only] [--preview original|A|B|C] [--profile]");
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "argumento desconocido"));
             }
         }
     }
-    if interactive && diagnostics_only {
+    if interactive && (diagnostics_only || preview.is_some()) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "--diagnostics-only requiere el modo offline",
+            "diagnostics-only y preview requieren el modo offline",
         ));
     }
     if interactive {
         #[cfg(feature = "interactive")]
         {
-            return run_app(true, diagnostics, diagnostics_only);
+            return run_app(true, diagnostics, diagnostics_only, preview, profile);
         }
         #[cfg(not(feature = "interactive"))]
         {
@@ -73,10 +197,12 @@ fn main() -> io::Result<()> {
             return Err(io::Error::new(io::ErrorKind::Unsupported, "feature interactive no habilitada"));
         }
     }
-    run_app(false, diagnostics, diagnostics_only)
+    run_app(false, diagnostics, diagnostics_only, preview, profile)
 }
 
-fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool) -> io::Result<()> {
+fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool, preview: Option<PreviewCurve>, profile_enabled: bool) -> io::Result<()> {
+    #[cfg(not(feature = "interactive"))]
+    let _ = profile_enabled;
     let solaris = load_obj("assets/models/obj/solaris.obj").map_err(io::Error::other)?;
     let vesper = load_obj("assets/models/obj/vesper.obj").map_err(io::Error::other)?;
     let selene = load_obj("assets/models/obj/selene.obj").map_err(io::Error::other)?;
@@ -159,7 +285,7 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
         let mut framebuffer = render_frame(
             clock.time(), &interactive_camera, &solaris, &vesper, &selene, &nymara,
             &ring_inner, &ring_middle, &ring_outer, &cryon, &veridis, &umbra,
-            &solene, poses, &shadow_scene, Some(&background_colors), diagnostics_enabled,
+            &solene, poses, &shadow_scene, Some(&background_colors), diagnostics_enabled, None, None,
         )?;
         let mut clean_colors = framebuffer.color_buffer().to_vec();
         hud::draw(&mut framebuffer, HudState {
@@ -176,11 +302,15 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
         let mut dragging = false;
         let mut previous_mouse = None;
         let mut last_tick = Instant::now();
+        let mut profiler = profile_enabled.then(ProfileWindow::new);
         while window.is_open() {
+            let frame_start = Instant::now();
+            let mut profile_frame = ProfileFrame::default();
             let mut camera_changed = false;
             let mut scene_changed = false;
             let mut hud_dirty = false;
             let mut background_changed = false;
+            let update_start = Instant::now();
             let now = Instant::now();
             let real_delta = now.duration_since(last_tick).as_secs_f32();
             last_tick = now;
@@ -274,15 +404,20 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
                     scene_changed = true;
                 }
             }
+            profile_frame.update_ms = update_start.elapsed().as_secs_f64() * 1000.0;
             if scene_changed {
+                let poses_start = Instant::now();
                 poses = build_poses(
                     clock.time(), solaris_motion, vesper_motion, nymara_motion, cryon_motion,
                     veridis_motion, umbra_motion, solene_motion,
                 );
+                profile_frame.poses_ms = poses_start.elapsed().as_secs_f64() * 1000.0;
+                let shadows_start = Instant::now();
                 shadow_scene = build_shadow_scene(
                     &vesper, &selene, &nymara, &ring_inner, &ring_middle, &ring_outer,
                     &cryon, &veridis, &umbra, &solene, poses,
                 );
+                profile_frame.shadows_ms = shadows_start.elapsed().as_secs_f64() * 1000.0;
                 camera_changed = true;
                 hud_dirty = true;
                 println!("Tiempo de simulacion: {:.3}", clock.time());
@@ -292,18 +427,21 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
                     .camera_for_target(poses.get(controller.target_id).world_position)
                     .map_err(io::Error::other)?;
                 if background_changed {
+                    let background_start = Instant::now();
                     background_colors = space_background.render(&current_camera, 800, 600);
+                    profile_frame.background_ms = background_start.elapsed().as_secs_f64() * 1000.0;
                 }
                 let updated = render_frame(
                     clock.time(), &current_camera, &solaris, &vesper, &selene, &nymara,
                     &ring_inner, &ring_middle, &ring_outer, &cryon, &veridis, &umbra,
-                    &solene, poses, &shadow_scene, Some(&background_colors), diagnostics_enabled,
+                    &solene, poses, &shadow_scene, Some(&background_colors), diagnostics_enabled, None, Some(&mut profile_frame),
                 )?;
                 framebuffer = updated;
                 clean_colors = framebuffer.color_buffer().to_vec();
                 hud_dirty = true;
             }
             if hud_dirty {
+                let hud_start = Instant::now();
                 if !camera_changed {
                     framebuffer.restore_colors(&clean_colors);
                 }
@@ -313,21 +451,40 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
                     paused: clock.is_paused(),
                     speed: clock.speed(),
                 });
+                profile_frame.hud_ms = hud_start.elapsed().as_secs_f64() * 1000.0;
+                let conversion_start = Instant::now();
                 window.set_framebuffer(&framebuffer);
+                profile_frame.conversion_ms = conversion_start.elapsed().as_secs_f64() * 1000.0;
             }
+            let present_start = Instant::now();
             window.present().map_err(io::Error::other)?;
+            profile_frame.present_ms = present_start.elapsed().as_secs_f64() * 1000.0;
+            let wait_start = Instant::now();
             std::thread::sleep(Duration::from_millis(16));
+            profile_frame.wait_ms = wait_start.elapsed().as_secs_f64() * 1000.0;
+            profile_frame.total_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
+            if let Some(profiler) = &mut profiler {
+                profiler.record(profile_frame);
+            }
         }
         return Ok(());
     }
 
-    let outputs = [
-        ("output/phase19c_camera_static.ppm", 0.0, CameraMode::Static),
-        ("output/phase19c_camera_solaris.ppm", 4.0, CameraMode::Orbit(BodyId::Solaris, 5.0)),
-        ("output/phase19c_camera_vesper.ppm", 4.0, CameraMode::Orbit(BodyId::Vesper, 4.8)),
-        ("output/phase19c_camera_selene.ppm", 4.0, CameraMode::Orbit(BodyId::Selene, 2.0)),
-        ("output/phase19c_camera_nymara.ppm", 4.0, CameraMode::Orbit(BodyId::Nymara, 6.2)),
-    ];
+    let outputs = if let Some(preview) = preview {
+        let output = preview.output_path();
+        if std::path::Path::new(output).exists() {
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("preview ya existe: {output}")));
+        }
+        vec![(output, 0.0, CameraMode::Static)]
+    } else {
+        vec![
+            ("output/phase19c_camera_static.ppm", 0.0, CameraMode::Static),
+            ("output/phase19c_camera_solaris.ppm", 4.0, CameraMode::Orbit(BodyId::Solaris, 5.0)),
+            ("output/phase19c_camera_vesper.ppm", 4.0, CameraMode::Orbit(BodyId::Vesper, 4.8)),
+            ("output/phase19c_camera_selene.ppm", 4.0, CameraMode::Orbit(BodyId::Selene, 2.0)),
+            ("output/phase19c_camera_nymara.ppm", 4.0, CameraMode::Orbit(BodyId::Nymara, 6.2)),
+        ]
+    };
     for (output, time, mode) in outputs {
         let poses = build_poses(
             time, solaris_motion, vesper_motion, nymara_motion, cryon_motion,
@@ -351,7 +508,7 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
         let framebuffer = render_frame(
             time, &frame_camera, &solaris, &vesper, &selene, &nymara,
             &ring_inner, &ring_middle, &ring_outer, &cryon, &veridis, &umbra, &solene,
-            poses, &shadow_scene, None, diagnostics_enabled,
+            poses, &shadow_scene, None, diagnostics_enabled, preview.and_then(PreviewCurve::parameters), None,
         )?;
         if !diagnostics_only {
             fs::create_dir_all("output")?;
@@ -485,6 +642,8 @@ fn render_frame(
     shadow_scene: &Arc<ShadowScene>,
     background_colors: Option<&[Color]>,
     diagnostics_enabled: bool,
+    vesper_emission_curve: Option<(f32, f32)>,
+    mut profile_frame: Option<&mut ProfileFrame>,
 ) -> io::Result<Framebuffer> {
     let solaris_model = poses.get(BodyId::Solaris).model_matrix;
     let vesper_model = poses.get(BodyId::Vesper).model_matrix;
@@ -502,14 +661,19 @@ fn render_frame(
         light_color: Color::new_const(1.0, 0.86, 0.68), light_intensity: 1.8,
         light_attenuation: 0.04, ambient_light: 0.10,
         shadow_scene: Some(shadow_scene.clone()), diagnostics: diagnostics.clone(),
+        vesper_emission_curve,
         ..ShaderUniforms::default()
     };
+    let framebuffer_setup_start = Instant::now();
     let mut framebuffer = Framebuffer::new(800, 600).map_err(io::Error::other)?;
     framebuffer.clear(Color::new(0.003, 0.004, 0.010));
     if let Some(colors) = background_colors {
         if colors.len() == framebuffer.width() * framebuffer.height() {
             framebuffer.restore_colors(colors);
         }
+    }
+    if let Some(profile_frame) = profile_frame.as_mut() {
+        profile_frame.framebuffer_ms = framebuffer_setup_start.elapsed().as_secs_f64() * 1000.0;
     }
 
     let solaris_shader = SolarisShader::default();
@@ -548,6 +712,9 @@ fn render_frame(
     println!("Rendered t={time:.2}; {} shadow triangles; {:?}", shadow_scene.triangle_count(), render_start.elapsed());
     if let Some(diagnostics) = diagnostics {
         println!("{}", diagnostics.report());
+    }
+    if let Some(profile_frame) = profile_frame {
+        profile_frame.geometry_ms = render_start.elapsed().as_secs_f64() * 1000.0;
     }
     Ok(framebuffer)
 }

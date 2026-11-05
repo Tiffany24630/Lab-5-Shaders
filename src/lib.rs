@@ -9,6 +9,7 @@ pub mod hud;
 pub mod math;
 pub mod orbit_camera;
 pub mod pipeline;
+pub mod profile;
 pub mod procedural;
 pub mod rasterizer;
 pub mod scene;

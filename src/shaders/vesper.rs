@@ -79,7 +79,17 @@ impl FragmentShader for VesperShader {
 
         let emitted = scale_color(
             lava,
-            finite_or(self.emission, 1.15).max(0.0) * lava_strength,
+            finite_or(self.emission, 1.15).max(0.0)
+                * lava_strength
+                * uniforms.vesper_emission_curve
+                    .map(|(threshold, minimum)| {
+                        if lava_strength <= threshold {
+                            1.0
+                        } else {
+                            1.0 - (1.0 - minimum) * ((lava_strength - threshold) / (1.0 - threshold))
+                        }
+                    })
+                    .unwrap_or(1.0),
         );
         apply_point_light_with_lava(
             rock_color,

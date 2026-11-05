@@ -2,6 +2,7 @@ use crate::color::Color;
 use crate::framebuffer::Framebuffer;
 use crate::math::Vec3;
 use crate::shader::{FragmentInput, FragmentShader, ShaderUniforms, VertexColorShader};
+use std::time::Instant;
 
 #[derive(Clone, Copy, Debug)]
 pub struct RasterVertex {
@@ -209,7 +210,11 @@ pub fn rasterize_triangle_with_shader<S: FragmentShader>(
                 screen_position,
                 vertex_color: color,
             };
+            let shader_started = uniforms.detail_profile.as_ref().map(|_| Instant::now());
             let shaded = shader.shade(&input, uniforms);
+            if let (Some(profile), Some(shader_started)) = (&uniforms.detail_profile, shader_started) {
+                profile.add_shader(shader_started.elapsed());
+            }
             if !shaded.r.is_finite() || !shaded.g.is_finite() || !shaded.b.is_finite() {
                 continue;
             }

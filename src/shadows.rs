@@ -1,5 +1,7 @@
 use crate::geometry::Mesh;
 use crate::math::{Mat4, Vec3};
+use crate::profile::DetailedProfile;
+use std::time::Instant;
 
 const EPSILON: f32 = 1.0e-5;
 
@@ -113,27 +115,44 @@ impl ShadowScene {
         point: Vec3,
         light_position: Vec3,
         receiver_id: u32,
+        profile: Option<&DetailedProfile>,
     ) -> bool {
+        let started = profile.map(|_| Instant::now());
         let to_light = light_position - point;
         let distance = to_light.length();
         if !distance.is_finite() || distance <= EPSILON {
+            if let (Some(profile), Some(started)) = (profile, started) { profile.add_shadow_query(started.elapsed()); }
             return false;
         }
         let direction = to_light / distance;
         let origin = point + direction * (EPSILON * 4.0);
-        self.objects.iter().any(|object| {
+        let mut occluded = false;
+        for object in &self.objects {
             if object.object_id == receiver_id
-                || !object
-                    .bounds
-                    .intersects_segment(origin, direction, distance - EPSILON)
             {
-                return false;
+                continue;
             }
-            object.triangles.iter().any(|triangle| {
-                ray_triangle_intersection(origin, direction, triangle.vertices)
+            if !object.bounds.intersects_segment(origin, direction, distance - EPSILON) {
+                if let Some(profile) = profile { profile.add_shadow_aabb_discarded(); }
+                continue;
+            }
+            if let Some(profile) = profile { profile.add_shadow_aabb_passed(); }
+            for triangle in &object.triangles {
+                if let Some(profile) = profile { profile.add_shadow_triangle_test(); }
+                if ray_triangle_intersection(origin, direction, triangle.vertices)
                     .is_some_and(|hit| hit < distance - EPSILON)
-            })
-        })
+                {
+                    occluded = true;
+                    if let Some(profile) = profile { profile.add_shadow_occluded(); }
+                    break;
+                }
+            }
+            if occluded { break; }
+        }
+        if let (Some(profile), Some(started)) = (profile, started) {
+            profile.add_shadow_query(started.elapsed());
+        }
+        occluded
     }
 
     pub fn object_count(&self) -> usize {
