@@ -1,6 +1,6 @@
 use crate::color::Color;
 use crate::diagnostics::{DiagnosticObject, DiagnosticSample, DiagnosticsHandle, LavaDiagnostic};
-use crate::math::{Mat4, Vec2, Vec3};
+use crate::math::{Mat4, NormalTransform, Vec2, Vec3};
 use crate::profile::{DetailedProfile, ProceduralDetailProfile, RasterDetailProfile, ShaderDetailProfile};
 use std::sync::Arc;
 
@@ -43,6 +43,7 @@ pub struct ShaderUniforms {
     pub framebuffer_fused_write: bool,
     pub raster_incremental_coverage: bool,
     pub cached_camera_matrices: Option<CachedCameraMatrices>,
+    pub cached_normal_transform: Option<NormalTransform>,
     pub parameters: [f32; 8],
 }
 
@@ -69,6 +70,7 @@ impl Default for ShaderUniforms {
             framebuffer_fused_write: false,
             raster_incremental_coverage: false,
             cached_camera_matrices: None,
+            cached_normal_transform: None,
             parameters: [0.0; 8],
         }
     }

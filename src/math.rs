@@ -245,6 +245,42 @@ impl Mat4 {
         )
         .normalized()
     }
+
+    pub fn precompute_normal_transform(self) -> NormalTransform {
+        let m = self.m;
+        let c00 = m[1][1] * m[2][2] - m[1][2] * m[2][1];
+        let c01 = m[1][2] * m[2][0] - m[1][0] * m[2][2];
+        let c02 = m[1][0] * m[2][1] - m[1][1] * m[2][0];
+        let c10 = m[0][2] * m[2][1] - m[0][1] * m[2][2];
+        let c11 = m[0][0] * m[2][2] - m[0][2] * m[2][0];
+        let c12 = m[0][1] * m[2][0] - m[0][0] * m[2][1];
+        let c20 = m[0][1] * m[1][2] - m[0][2] * m[1][1];
+        let c21 = m[0][2] * m[1][0] - m[0][0] * m[1][2];
+        let c22 = m[0][0] * m[1][1] - m[0][1] * m[1][0];
+        let determinant = m[0][0] * c00 + m[0][1] * c01 + m[0][2] * c02;
+        NormalTransform { c00, c01, c02, c10, c11, c12, c20, c21, c22, determinant }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NormalTransform {
+    c00: f32, c01: f32, c02: f32,
+    c10: f32, c11: f32, c12: f32,
+    c20: f32, c21: f32, c22: f32,
+    determinant: f32,
+}
+
+impl NormalTransform {
+    pub fn transform_normal(self, normal: Vec3) -> Vec3 {
+        if !self.determinant.is_finite() || self.determinant.abs() <= f32::EPSILON {
+            return Vec3::ZERO;
+        }
+        Vec3::new(
+            (self.c00 * normal.x + self.c01 * normal.y + self.c02 * normal.z) / self.determinant,
+            (self.c10 * normal.x + self.c11 * normal.y + self.c12 * normal.z) / self.determinant,
+            (self.c20 * normal.x + self.c21 * normal.y + self.c22 * normal.z) / self.determinant,
+        ).normalized()
+    }
 }
 
 impl Mul for Mat4 {

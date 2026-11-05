@@ -87,7 +87,10 @@ pub fn render_triangle_with_shader<S: FragmentShader>(
         position: transform
             * Vec4::new(vertex.position.x, vertex.position.y, vertex.position.z, 1.0),
         color: vertex.color,
-        normal: model.transform_normal(vertex.normal),
+        normal: uniforms
+            .cached_normal_transform
+            .map(|transform| transform.transform_normal(vertex.normal))
+            .unwrap_or_else(|| model.transform_normal(vertex.normal)),
         local_position: vertex.position,
         world_position: model.transform_point(vertex.position),
         uv: vertex.texcoord,
