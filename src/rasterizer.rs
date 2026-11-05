@@ -167,17 +167,50 @@ pub fn rasterize_triangle_with_shader<S: FragmentShader>(
 
     let mut written = 0;
     let mut candidate_index = 0u64;
+    let incremental = uniforms.raster_incremental_coverage;
+    let edge_increments = incremental.then(|| {
+        (
+            (v2.y - v1.y, -(v2.x - v1.x)),
+            (v0.y - v2.y, -(v0.x - v2.x)),
+            (v1.y - v0.y, -(v1.x - v0.x)),
+        )
+    });
+    let first_px = min_x as f32 + 0.5;
+    let first_py = min_y as f32 + 0.5;
+    let first_edges = incremental.then(|| {
+        (
+            edge(v1.x, v1.y, v2.x, v2.y, first_px, first_py),
+            edge(v2.x, v2.y, v0.x, v0.y, first_px, first_py),
+            edge(v0.x, v0.y, v1.x, v1.y, first_px, first_py),
+        )
+    });
+    let mut row_edges = first_edges;
     for y in min_y..=max_y {
+        let mut pixel_edges = row_edges;
         for x in min_x..=max_x {
             let sampled = candidate_index % 64 == 0;
             candidate_index += 1;
             let coverage_started = sampled.then(Instant::now);
             let px = x as f32 + 0.5;
             let py = y as f32 + 0.5;
-            let lambda0 = edge(v1.x, v1.y, v2.x, v2.y, px, py) / area;
-            let lambda1 = edge(v2.x, v2.y, v0.x, v0.y, px, py) / area;
-            let lambda2 = edge(v0.x, v0.y, v1.x, v1.y, px, py) / area;
-            if lambda0 < -1.0e-6 || lambda1 < -1.0e-6 || lambda2 < -1.0e-6 {
+            let current_edges = pixel_edges;
+            if let (Some(edges), Some(increments)) = (pixel_edges, edge_increments) {
+                pixel_edges = Some((
+                    edges.0 + increments.0.0,
+                    edges.1 + increments.1.0,
+                    edges.2 + increments.2.0,
+                ));
+            }
+            let (coverage0, coverage1, coverage2) = if let Some(edges) = current_edges {
+                (edges.0 / area, edges.1 / area, edges.2 / area)
+            } else {
+                (
+                    edge(v1.x, v1.y, v2.x, v2.y, px, py) / area,
+                    edge(v2.x, v2.y, v0.x, v0.y, px, py) / area,
+                    edge(v0.x, v0.y, v1.x, v1.y, px, py) / area,
+                )
+            };
+            if coverage0 < -1.0e-6 || coverage1 < -1.0e-6 || coverage2 < -1.0e-6 {
                 if let (Some(profile), Some(started)) = (raster_detail, coverage_started) {
                     let mut sample = RasterTriangleCounters::default();
                     sample.coverage_samples = 1;
@@ -186,6 +219,15 @@ pub fn rasterize_triangle_with_shader<S: FragmentShader>(
                 }
                 continue;
             }
+            let (lambda0, lambda1, lambda2) = if incremental {
+                (
+                    edge(v1.x, v1.y, v2.x, v2.y, px, py) / area,
+                    edge(v2.x, v2.y, v0.x, v0.y, px, py) / area,
+                    edge(v0.x, v0.y, v1.x, v1.y, px, py) / area,
+                )
+            } else {
+                (coverage0, coverage1, coverage2)
+            };
             counters.covered_pixels += 1;
             if let (Some(profile), Some(started)) = (raster_detail, coverage_started) {
                 let mut sample = RasterTriangleCounters::default();
@@ -224,7 +266,14 @@ pub fn rasterize_triangle_with_shader<S: FragmentShader>(
                 color_over_w.b / inv_w,
             );
             let depth_started = sampled.then(Instant::now);
-            let depth_passed = framebuffer.depth_test(x as usize, y as usize, depth);
+            let depth_reservation = uniforms.framebuffer_fused_write
+                .then(|| framebuffer.depth_test_and_reserve(x as usize, y as usize, depth))
+                .flatten();
+            let depth_passed = if uniforms.framebuffer_fused_write {
+                depth_reservation.is_some()
+            } else {
+                framebuffer.depth_test(x as usize, y as usize, depth)
+            };
             if let (Some(profile), Some(started)) = (raster_detail, depth_started) {
                 let mut sample = RasterTriangleCounters::default();
                 sample.depth_samples = 1;
@@ -298,12 +347,15 @@ pub fn rasterize_triangle_with_shader<S: FragmentShader>(
                 continue;
             }
             let write_started = sampled.then(Instant::now);
-            let pixel_written = framebuffer.write_pixel(
-                x as usize,
-                y as usize,
-                Color::new(shaded.r, shaded.g, shaded.b),
-                depth,
-            );
+            let display_color = Color::new(shaded.r, shaded.g, shaded.b);
+            let pixel_written = if uniforms.framebuffer_fused_write {
+                framebuffer.write_reserved_pixel(
+                    depth_reservation.expect("depth reservation must exist after a passing test"),
+                    display_color,
+                )
+            } else {
+                framebuffer.write_pixel(x as usize, y as usize, display_color, depth)
+            };
             if let (Some(profile), Some(started)) = (raster_detail, write_started) {
                 let mut sample = RasterTriangleCounters::default();
                 sample.write_samples = 1;
@@ -314,6 +366,13 @@ pub fn rasterize_triangle_with_shader<S: FragmentShader>(
                 counters.written_fragments += 1;
                 written += 1;
             }
+        }
+        if let (Some(edges), Some(increments)) = (row_edges, edge_increments) {
+            row_edges = Some((
+                edges.0 + increments.0.1,
+                edges.1 + increments.1.1,
+                edges.2 + increments.2.1,
+            ));
         }
     }
     if let (Some(profile), Some(object)) = (shader_detail, uniforms.diagnostic_object) {

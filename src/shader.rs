@@ -1,6 +1,6 @@
 use crate::color::Color;
 use crate::diagnostics::{DiagnosticObject, DiagnosticSample, DiagnosticsHandle, LavaDiagnostic};
-use crate::math::{Vec2, Vec3};
+use crate::math::{Mat4, Vec2, Vec3};
 use crate::profile::{DetailedProfile, ProceduralDetailProfile, RasterDetailProfile, ShaderDetailProfile};
 use std::sync::Arc;
 
@@ -13,6 +13,12 @@ pub struct FragmentInput {
     pub depth: f32,
     pub screen_position: Vec2,
     pub vertex_color: Color,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CachedCameraMatrices {
+    pub view: Mat4,
+    pub projection: Mat4,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -34,6 +40,9 @@ pub struct ShaderUniforms {
     pub shader_detail_profile: Option<ShaderDetailProfile>,
     pub procedural_detail_profile: Option<ProceduralDetailProfile>,
     pub solene_normalized_light: bool,
+    pub framebuffer_fused_write: bool,
+    pub raster_incremental_coverage: bool,
+    pub cached_camera_matrices: Option<CachedCameraMatrices>,
     pub parameters: [f32; 8],
 }
 
@@ -57,6 +66,9 @@ impl Default for ShaderUniforms {
             shader_detail_profile: None,
             procedural_detail_profile: None,
             solene_normalized_light: false,
+            framebuffer_fused_write: false,
+            raster_incremental_coverage: false,
+            cached_camera_matrices: None,
             parameters: [0.0; 8],
         }
     }

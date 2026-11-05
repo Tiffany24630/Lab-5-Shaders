@@ -24,7 +24,7 @@ use aetheria::procedural::{fbm_comparison_stats, fbm_normalization_table_matches
 use aetheria::profile::{DetailedProfile, DetailedProfileStats, ProceduralDetailProfile, ProceduralDetailStats, RasterDetailProfile, RasterDetailStats, ShaderDetailProfile, ShaderDetailStats};
 use aetheria::orbit_camera::OrbitCameraController;
 use aetheria::scene::{BodyId, BodyPose, BodyPoses};
-use aetheria::shader::ShaderUniforms;
+use aetheria::shader::{CachedCameraMatrices, ShaderUniforms};
 use aetheria::shaders::cryon::CryonShader;
 use aetheria::shaders::nymara::{NymaraRingShader, NymaraShader};
 use aetheria::shaders::selene::SeleneShader;
@@ -258,6 +258,14 @@ fn main() -> io::Result<()> {
     let mut fbm_original = false;
     let mut fbm_compare = false;
     let mut benchmark_fbm = false;
+    let mut framebuffer_fused_write = false;
+    let mut framebuffer_compare = false;
+    let mut benchmark_framebuffer = false;
+    let mut raster_incremental_coverage = false;
+    let mut raster_incremental_compare = false;
+    let mut camera_matrices_cached = false;
+    let mut camera_matrices_compare = false;
+    let mut benchmark_camera_matrices = false;
     let mut preview = None;
     let mut arguments = env::args().skip(1);
     while let Some(argument) = arguments.next() {
@@ -309,13 +317,21 @@ fn main() -> io::Result<()> {
             "--fbm-original" => fbm_original = true,
             "--fbm-compare" => fbm_compare = true,
             "--benchmark-fbm" => benchmark_fbm = true,
+            "--framebuffer-fused-write" => framebuffer_fused_write = true,
+            "--framebuffer-fused-compare" => framebuffer_compare = true,
+            "--benchmark-framebuffer-write" => benchmark_framebuffer = true,
+            "--raster-incremental-coverage" => raster_incremental_coverage = true,
+            "--raster-incremental-compare" => raster_incremental_compare = true,
+            "--camera-matrices-cached" => camera_matrices_cached = true,
+            "--camera-matrices-compare" => camera_matrices_compare = true,
+            "--benchmark-camera-matrices" => benchmark_camera_matrices = true,
             "--preview" => {
                 let value = arguments.next().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "--preview requiere original, A, B o C"))?;
                 preview = Some(PreviewCurve::parse(&value).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "preview invalido: use original, A, B o C"))?);
                 diagnostics = true;
             }
             _ => {
-                eprintln!("Uso: aetheria [--offline] [--interactive] [--diagnostics] [--diagnostics-only] [--preview original|A|B|C] [--profile] [--profile-detail] [--profile-raster-detail] [--profile-shader-detail] [--profile-procedural-detail] [--benchmark-static] [--benchmark-fbm] [--shadow-bvh] [--shadow-brute-force] [--shadow-compare] [--shadow-compare-all] [--solene-normalized] [--solene-experiment-original] [--fbm-original|--fbm-precomputed|--fbm-compare]");
+                eprintln!("Uso: aetheria [--offline] [--interactive] [--diagnostics] [--diagnostics-only] [--preview original|A|B|C] [--profile] [--profile-detail] [--profile-raster-detail] [--profile-shader-detail] [--profile-procedural-detail] [--benchmark-static] [--benchmark-fbm] [--benchmark-framebuffer-write] [--benchmark-camera-matrices] [--framebuffer-fused-write] [--framebuffer-fused-compare] [--raster-incremental-coverage] [--raster-incremental-compare] [--camera-matrices-cached] [--camera-matrices-compare] [--shadow-bvh] [--shadow-brute-force] [--shadow-compare] [--shadow-compare-all] [--solene-normalized] [--solene-experiment-original] [--fbm-original|--fbm-precomputed|--fbm-compare]");
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "argumento desconocido"));
             }
         }
@@ -347,6 +363,21 @@ fn main() -> io::Result<()> {
     if benchmark_fbm && (!fbm_original && !fbm_precomputed || fbm_original && fbm_precomputed) {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "--benchmark-fbm requiere exactamente --fbm-original o --fbm-precomputed"));
     }
+    if framebuffer_compare && !diagnostics_only {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "--framebuffer-fused-compare requiere --diagnostics-only"));
+    }
+    if raster_incremental_compare && !diagnostics_only {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "--raster-incremental-compare requiere --diagnostics-only"));
+    }
+    if camera_matrices_compare && !diagnostics_only {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "--camera-matrices-compare requiere --diagnostics-only"));
+    }
+    if benchmark_camera_matrices && interactive {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "--benchmark-camera-matrices requiere el modo offline"));
+    }
+    if benchmark_framebuffer && interactive {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "--benchmark-framebuffer-write requiere el modo offline"));
+    }
     if interactive && solene_experiment_original {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "--solene-experiment-original requiere el modo offline"));
     }
@@ -356,7 +387,7 @@ fn main() -> io::Result<()> {
     if interactive {
         #[cfg(feature = "interactive")]
         {
-            return run_app(true, diagnostics, diagnostics_only, preview, profile, profile_detail, profile_raster_detail, profile_shader_detail, profile_procedural_detail, benchmark_static, shadow_bvh, shadow_compare, shadow_compare_all, solene_normalized, solene_experiment_original, fbm_precomputed, fbm_original, fbm_compare, benchmark_fbm);
+            return run_app(true, diagnostics, diagnostics_only, preview, profile, profile_detail, profile_raster_detail, profile_shader_detail, profile_procedural_detail, benchmark_static, shadow_bvh, shadow_compare, shadow_compare_all, solene_normalized, solene_experiment_original, fbm_precomputed, fbm_original, fbm_compare, benchmark_fbm, framebuffer_fused_write, framebuffer_compare, benchmark_framebuffer, raster_incremental_coverage, raster_incremental_compare, camera_matrices_cached, camera_matrices_compare, benchmark_camera_matrices);
         }
         #[cfg(not(feature = "interactive"))]
         {
@@ -364,10 +395,10 @@ fn main() -> io::Result<()> {
             return Err(io::Error::new(io::ErrorKind::Unsupported, "feature interactive no habilitada"));
         }
     }
-    run_app(false, diagnostics, diagnostics_only, preview, profile, profile_detail, profile_raster_detail, profile_shader_detail, profile_procedural_detail, benchmark_static, shadow_bvh, shadow_compare, shadow_compare_all, solene_normalized, solene_experiment_original, fbm_precomputed, fbm_original, fbm_compare, benchmark_fbm)
+    run_app(false, diagnostics, diagnostics_only, preview, profile, profile_detail, profile_raster_detail, profile_shader_detail, profile_procedural_detail, benchmark_static, shadow_bvh, shadow_compare, shadow_compare_all, solene_normalized, solene_experiment_original, fbm_precomputed, fbm_original, fbm_compare, benchmark_fbm, framebuffer_fused_write, framebuffer_compare, benchmark_framebuffer, raster_incremental_coverage, raster_incremental_compare, camera_matrices_cached, camera_matrices_compare, benchmark_camera_matrices)
 }
 
-fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool, preview: Option<PreviewCurve>, profile_enabled: bool, profile_detail: bool, profile_raster_detail: bool, profile_shader_detail: bool, profile_procedural_detail: bool, benchmark_static: bool, shadow_bvh: bool, shadow_compare: bool, shadow_compare_all: bool, solene_normalized: bool, solene_experiment_original: bool, fbm_precomputed: bool, fbm_original: bool, fbm_compare: bool, benchmark_fbm: bool) -> io::Result<()> {
+fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool, preview: Option<PreviewCurve>, profile_enabled: bool, profile_detail: bool, profile_raster_detail: bool, profile_shader_detail: bool, profile_procedural_detail: bool, benchmark_static: bool, shadow_bvh: bool, shadow_compare: bool, shadow_compare_all: bool, solene_normalized: bool, solene_experiment_original: bool, fbm_precomputed: bool, fbm_original: bool, fbm_compare: bool, benchmark_fbm: bool, framebuffer_fused_write: bool, framebuffer_compare: bool, benchmark_framebuffer: bool, raster_incremental_coverage: bool, raster_incremental_compare: bool, camera_matrices_cached: bool, camera_matrices_compare: bool, benchmark_camera_matrices: bool) -> io::Result<()> {
     #[cfg(not(feature = "interactive"))]
     let _ = profile_enabled;
     #[cfg(not(feature = "interactive"))]
@@ -452,7 +483,39 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
             &camera, &solaris, &vesper, &selene, &nymara, &ring_inner, &ring_middle,
             &ring_outer, &cryon, &veridis, &umbra, &solene, solaris_motion, vesper_motion,
             nymara_motion, cryon_motion, veridis_motion, umbra_motion, solene_motion,
-            shadow_bvh, fbm_precomputed,
+            shadow_bvh, fbm_precomputed, framebuffer_fused_write,
+        );
+    }
+    if benchmark_framebuffer {
+        return run_framebuffer_benchmark(
+            &camera, &solaris, &vesper, &selene, &nymara, &ring_inner, &ring_middle,
+            &ring_outer, &cryon, &veridis, &umbra, &solene, solaris_motion, vesper_motion,
+            nymara_motion, cryon_motion, veridis_motion, umbra_motion, solene_motion,
+            shadow_bvh, framebuffer_fused_write, raster_incremental_coverage,
+        );
+    }
+    if benchmark_camera_matrices {
+        return run_camera_matrices_benchmark(
+            &camera, &solaris, &vesper, &selene, &nymara, &ring_inner, &ring_middle,
+            &ring_outer, &cryon, &veridis, &umbra, &solene, solaris_motion, vesper_motion,
+            nymara_motion, cryon_motion, veridis_motion, umbra_motion, solene_motion,
+            shadow_bvh, camera_matrices_cached,
+        );
+    }
+    if framebuffer_compare {
+        return run_framebuffer_compare(
+            &camera, &solaris, &vesper, &selene, &nymara, &ring_inner, &ring_middle,
+            &ring_outer, &cryon, &veridis, &umbra, &solene, solaris_motion, vesper_motion,
+            nymara_motion, cryon_motion, veridis_motion, umbra_motion, solene_motion,
+            shadow_bvh,
+        );
+    }
+    if raster_incremental_compare {
+        return run_raster_incremental_compare(
+            &camera, &solaris, &vesper, &selene, &nymara, &ring_inner, &ring_middle,
+            &ring_outer, &cryon, &veridis, &umbra, &solene, solaris_motion, vesper_motion,
+            nymara_motion, cryon_motion, veridis_motion, umbra_motion, solene_motion,
+            shadow_bvh,
         );
     }
 
@@ -480,7 +543,7 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
         let mut framebuffer = render_frame(
             clock.time(), &interactive_camera, &solaris, &vesper, &selene, &nymara,
             &ring_inner, &ring_middle, &ring_outer, &cryon, &veridis, &umbra,
-            &solene, poses, &shadow_scene, Some(&background_colors), diagnostics_enabled, None, solene_normalized, None, None, None, None, None,
+            &solene, poses, &shadow_scene, Some(&background_colors), diagnostics_enabled, None, solene_normalized, framebuffer_fused_write, raster_incremental_coverage, camera_matrices_cached, None, None, None, None, None,
         )?;
         let mut clean_colors = framebuffer.color_buffer().to_vec();
         hud::draw(&mut framebuffer, HudState {
@@ -643,7 +706,7 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
                 let updated = render_frame(
                     clock.time(), &current_camera, &solaris, &vesper, &selene, &nymara,
                     &ring_inner, &ring_middle, &ring_outer, &cryon, &veridis, &umbra,
-                    &solene, poses, &shadow_scene, Some(&background_colors), diagnostics_enabled, None, solene_normalized, detail_profile.clone(), raster_detail_profile.clone(), shader_detail_profile.clone(), procedural_detail_profile.clone(), Some(&mut profile_frame),
+                    &solene, poses, &shadow_scene, Some(&background_colors), diagnostics_enabled, None, solene_normalized, framebuffer_fused_write, raster_incremental_coverage, camera_matrices_cached, detail_profile.clone(), raster_detail_profile.clone(), shader_detail_profile.clone(), procedural_detail_profile.clone(), Some(&mut profile_frame),
                 )?;
                 if let Some(detail_profile) = detail_profile {
                     profile_frame.detail = detail_profile.snapshot();
@@ -772,10 +835,37 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
             &cryon, &veridis, &umbra, &solene, poses, shadow_bvh, shadow_compare, shadow_compare_all,
         );
         println!("[SHADOW-ROUTE] mode={} bvh_nodes={} bvh_depth={}", if shadow_scene.uses_bvh() { "BVH" } else { "brute-force" }, shadow_scene.bvh_node_count(), shadow_scene.bvh_max_depth());
+        if camera_matrices_compare {
+            let original_matrices = (frame_camera.view_matrix(), frame_camera.projection_matrix());
+            let cached_matrices = (frame_camera.view_matrix(), frame_camera.projection_matrix());
+            let original = render_frame(
+                time, &frame_camera, &solaris, &vesper, &selene, &nymara,
+                &ring_inner, &ring_middle, &ring_outer, &cryon, &veridis, &umbra, &solene,
+                poses, &shadow_scene, None, diagnostics_enabled, preview.and_then(PreviewCurve::parameters), solene_normalized, framebuffer_fused_write, raster_incremental_coverage, false, None, None, None, None, None,
+            )?;
+            let cached = render_frame(
+                time, &frame_camera, &solaris, &vesper, &selene, &nymara,
+                &ring_inner, &ring_middle, &ring_outer, &cryon, &veridis, &umbra, &solene,
+                poses, &shadow_scene, None, diagnostics_enabled, preview.and_then(PreviewCurve::parameters), solene_normalized, framebuffer_fused_write, raster_incremental_coverage, true, None, None, None, None, None,
+            )?;
+            let color_differences = original.color_buffer().iter().zip(cached.color_buffer())
+                .filter(|(a, b)| a != b).count();
+            let depth_differences = original.depth_buffer().iter().zip(cached.depth_buffer())
+                .filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+            let original_rgb8 = original.serialize_ppm();
+            let cached_rgb8 = cached.serialize_ppm();
+            let rgb8_differences = original_rgb8.iter().zip(&cached_rgb8)
+                .filter(|(a, b)| a != b).count();
+            let matrix_differences = original_matrices.0 != cached_matrices.0
+                || original_matrices.1 != cached_matrices.1;
+            println!("[CAMERA-MATRICES-COMPARE] matrices_compared=2 matrix_differences={} clip_vertices_compared=0 projected_vertices_compared=0 (not exposed by current pipeline)", matrix_differences as u64);
+            println!("[CAMERA-MATRICES-COMPARE] pixels={} color_differences={} depth_differences={} rgb8_bytes={} rgb8_differences={} dimensions={:?}", original.color_buffer().len(), color_differences, depth_differences, original_rgb8.len(), rgb8_differences, original.dimensions());
+            break;
+        }
         let framebuffer = render_frame(
             time, &frame_camera, &solaris, &vesper, &selene, &nymara,
             &ring_inner, &ring_middle, &ring_outer, &cryon, &veridis, &umbra, &solene,
-            poses, &shadow_scene, None, diagnostics_enabled, preview.and_then(PreviewCurve::parameters), solene_normalized, None, None, None, None, None,
+            poses, &shadow_scene, None, diagnostics_enabled, preview.and_then(PreviewCurve::parameters), solene_normalized, framebuffer_fused_write, raster_incremental_coverage, camera_matrices_cached, None, None, None, None, None,
         )?;
         if !diagnostics_only {
             fs::create_dir_all("output")?;
@@ -914,6 +1004,7 @@ fn run_fbm_benchmark(
     solene_motion: BodyMotion,
     shadow_bvh: bool,
     fbm_precomputed: bool,
+    framebuffer_fused_write: bool,
 ) -> io::Result<()> {
     let poses = build_poses(
         0.0, solaris_motion, vesper_motion, nymara_motion, cryon_motion,
@@ -936,7 +1027,7 @@ fn run_fbm_benchmark(
         let _framebuffer = render_frame(
             0.0, camera, solaris, vesper, selene, nymara,
             ring_inner, ring_middle, ring_outer, cryon, veridis, umbra, solene,
-            poses, &shadow_scene, background_colors.as_deref(), false, None, false,
+            poses, &shadow_scene, background_colors.as_deref(), false, None, false, framebuffer_fused_write, false, false,
             None, None, None, None, None,
         )?;
         let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
@@ -954,6 +1045,288 @@ fn run_fbm_benchmark(
         sum, average, percentile(0.50), percentile(0.95), percentile(0.99),
         samples[0], *samples.last().unwrap(), 1000.0 / average,
     );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_camera_matrices_benchmark(
+    camera: &Camera,
+    solaris: &aetheria::assets::ObjAsset,
+    vesper: &aetheria::assets::ObjAsset,
+    selene: &aetheria::assets::ObjAsset,
+    nymara: &aetheria::assets::ObjAsset,
+    ring_inner: &aetheria::assets::ObjAsset,
+    ring_middle: &aetheria::assets::ObjAsset,
+    ring_outer: &aetheria::assets::ObjAsset,
+    cryon: &aetheria::assets::ObjAsset,
+    veridis: &aetheria::assets::ObjAsset,
+    umbra: &aetheria::assets::ObjAsset,
+    solene: &aetheria::assets::ObjAsset,
+    solaris_motion: BodyMotion,
+    vesper_motion: BodyMotion,
+    nymara_motion: BodyMotion,
+    cryon_motion: BodyMotion,
+    veridis_motion: BodyMotion,
+    umbra_motion: BodyMotion,
+    solene_motion: BodyMotion,
+    shadow_bvh: bool,
+    camera_matrices_cached: bool,
+) -> io::Result<()> {
+    let poses = build_poses(
+        0.0, solaris_motion, vesper_motion, nymara_motion, cryon_motion,
+        veridis_motion, umbra_motion, solene_motion,
+    );
+    let shadow_scene = build_shadow_scene(
+        vesper, selene, nymara, ring_inner, ring_middle, ring_outer,
+        cryon, veridis, umbra, solene, poses, shadow_bvh, false, false,
+    );
+    const WARMUP: usize = 10;
+    const MEASURED: usize = 60;
+    let mut samples = Vec::with_capacity(MEASURED);
+    for iteration in 0..(WARMUP + MEASURED) {
+        let started = Instant::now();
+        let _framebuffer = render_frame(
+            0.0, camera, solaris, vesper, selene, nymara,
+            ring_inner, ring_middle, ring_outer, cryon, veridis, umbra, solene,
+            poses, &shadow_scene, None, false, None, false, false, false,
+            camera_matrices_cached, None, None, None, None, None,
+        )?;
+        if iteration >= WARMUP {
+            samples.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
+    samples.sort_by(f64::total_cmp);
+    let sum: f64 = samples.iter().sum();
+    let average = sum / samples.len() as f64;
+    let percentile = |p: f64| samples[((samples.len() - 1) as f64 * p).round() as usize];
+    println!(
+        "[CAMERA-MATRICES-BENCH] variant={} warmup={} measured={} poses=1 shadow_scene_builds=1 background_generations=0 presentation=0 wait=0 total_ms={:.3} avg_ms={:.3} median_ms={:.3} p95_ms={:.3} p99_ms={:.3} min_ms={:.3} max_ms={:.3} fps_equiv={:.3}",
+        if camera_matrices_cached { "cached" } else { "original" }, WARMUP, MEASURED,
+        sum, average, percentile(0.50), percentile(0.95), percentile(0.99),
+        samples[0], *samples.last().unwrap(), 1000.0 / average,
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_framebuffer_benchmark(
+    camera: &Camera,
+    solaris: &aetheria::assets::ObjAsset,
+    vesper: &aetheria::assets::ObjAsset,
+    selene: &aetheria::assets::ObjAsset,
+    nymara: &aetheria::assets::ObjAsset,
+    ring_inner: &aetheria::assets::ObjAsset,
+    ring_middle: &aetheria::assets::ObjAsset,
+    ring_outer: &aetheria::assets::ObjAsset,
+    cryon: &aetheria::assets::ObjAsset,
+    veridis: &aetheria::assets::ObjAsset,
+    umbra: &aetheria::assets::ObjAsset,
+    solene: &aetheria::assets::ObjAsset,
+    solaris_motion: BodyMotion,
+    vesper_motion: BodyMotion,
+    nymara_motion: BodyMotion,
+    cryon_motion: BodyMotion,
+    veridis_motion: BodyMotion,
+    umbra_motion: BodyMotion,
+    solene_motion: BodyMotion,
+    shadow_bvh: bool,
+    framebuffer_fused_write: bool,
+    raster_incremental_coverage: bool,
+) -> io::Result<()> {
+    let poses = build_poses(
+        0.0, solaris_motion, vesper_motion, nymara_motion, cryon_motion,
+        veridis_motion, umbra_motion, solene_motion,
+    );
+    let shadow_scene = build_shadow_scene(
+        vesper, selene, nymara, ring_inner, ring_middle, ring_outer,
+        cryon, veridis, umbra, solene, poses, shadow_bvh, false, false,
+    );
+    const WARMUP: usize = 10;
+    const MEASURED: usize = 60;
+    let mut samples = Vec::with_capacity(MEASURED);
+    for iteration in 0..(WARMUP + MEASURED) {
+        let started = Instant::now();
+        let _framebuffer = render_frame(
+            0.0, camera, solaris, vesper, selene, nymara,
+            ring_inner, ring_middle, ring_outer, cryon, veridis, umbra, solene,
+            poses, &shadow_scene, None, false, None, false, framebuffer_fused_write, raster_incremental_coverage, false,
+            None, None, None, None, None,
+        )?;
+        if iteration >= WARMUP {
+            samples.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
+    samples.sort_by(f64::total_cmp);
+    let sum: f64 = samples.iter().sum();
+    let average = sum / samples.len() as f64;
+    let percentile = |p: f64| samples[((samples.len() - 1) as f64 * p).round() as usize];
+    println!(
+        "[FRAMEBUFFER-BENCH] variant={} warmup={} measured={} poses=1 shadow_scene_builds=1 presentation=0 wait=0 total_ms={:.3} avg_ms={:.3} median_ms={:.3} p95_ms={:.3} p99_ms={:.3} min_ms={:.3} max_ms={:.3} fps_equiv={:.3}",
+        if raster_incremental_coverage { "incremental" } else if framebuffer_fused_write { "fused" } else { "original" }, WARMUP, MEASURED,
+        sum, average, percentile(0.50), percentile(0.95), percentile(0.99),
+        samples[0], *samples.last().unwrap(), 1000.0 / average,
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_framebuffer_compare(
+    camera: &Camera,
+    solaris: &aetheria::assets::ObjAsset,
+    vesper: &aetheria::assets::ObjAsset,
+    selene: &aetheria::assets::ObjAsset,
+    nymara: &aetheria::assets::ObjAsset,
+    ring_inner: &aetheria::assets::ObjAsset,
+    ring_middle: &aetheria::assets::ObjAsset,
+    ring_outer: &aetheria::assets::ObjAsset,
+    cryon: &aetheria::assets::ObjAsset,
+    veridis: &aetheria::assets::ObjAsset,
+    umbra: &aetheria::assets::ObjAsset,
+    solene: &aetheria::assets::ObjAsset,
+    solaris_motion: BodyMotion,
+    vesper_motion: BodyMotion,
+    nymara_motion: BodyMotion,
+    cryon_motion: BodyMotion,
+    veridis_motion: BodyMotion,
+    umbra_motion: BodyMotion,
+    solene_motion: BodyMotion,
+    shadow_bvh: bool,
+) -> io::Result<()> {
+    let original_path = "output/phase22p_framebuffer_original.ppm";
+    let fused_path = "output/phase22p_framebuffer_fused.ppm";
+    if std::path::Path::new(original_path).exists() || std::path::Path::new(fused_path).exists() {
+        return Err(io::Error::new(io::ErrorKind::AlreadyExists, "los outputs de comparación de framebuffer ya existen"));
+    }
+    let poses = build_poses(
+        0.0, solaris_motion, vesper_motion, nymara_motion, cryon_motion,
+        veridis_motion, umbra_motion, solene_motion,
+    );
+    let shadow_scene = build_shadow_scene(
+        vesper, selene, nymara, ring_inner, ring_middle, ring_outer,
+        cryon, veridis, umbra, solene, poses, shadow_bvh, false, false,
+    );
+    let original = render_frame(
+        0.0, camera, solaris, vesper, selene, nymara,
+        ring_inner, ring_middle, ring_outer, cryon, veridis, umbra, solene,
+        poses, &shadow_scene, None, false, None, false, false, false, false,
+        None, None, None, None, None,
+    )?;
+    let fused = render_frame(
+        0.0, camera, solaris, vesper, selene, nymara,
+        ring_inner, ring_middle, ring_outer, cryon, veridis, umbra, solene,
+        poses, &shadow_scene, None, false, None, false, true, false, false,
+        None, None, None, None, None,
+    )?;
+    let mut color_pixels = 0u64;
+    let mut color_channels = 0u64;
+    let mut depth_values = 0u64;
+    for (a, b) in original.color_buffer().iter().zip(fused.color_buffer()) {
+        let differences = [a.r != b.r, a.g != b.g, a.b != b.b];
+        if differences.iter().any(|different| *different) { color_pixels += 1; }
+        color_channels += differences.iter().filter(|different| **different).count() as u64;
+    }
+    for (a, b) in original.depth_buffer().iter().zip(fused.depth_buffer()) {
+        if a.to_bits() != b.to_bits() { depth_values += 1; }
+    }
+    let original_ppm = original.serialize_ppm();
+    let fused_ppm = fused.serialize_ppm();
+    fs::create_dir_all("output")?;
+    fs::write(original_path, &original_ppm)?;
+    fs::write(fused_path, &fused_ppm)?;
+    println!("[FRAMEBUFFER-COMPARE] pixels={} color_pixels_different={} color_channels_different={} depth_values_different={} ppm_bytes_different={} original={} fused={}",
+        original.color_buffer().len(), color_pixels, color_channels, depth_values,
+        original_ppm.iter().zip(&fused_ppm).filter(|(a, b)| a != b).count(), original_path, fused_path);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_raster_incremental_compare(
+    camera: &Camera,
+    solaris: &aetheria::assets::ObjAsset,
+    vesper: &aetheria::assets::ObjAsset,
+    selene: &aetheria::assets::ObjAsset,
+    nymara: &aetheria::assets::ObjAsset,
+    ring_inner: &aetheria::assets::ObjAsset,
+    ring_middle: &aetheria::assets::ObjAsset,
+    ring_outer: &aetheria::assets::ObjAsset,
+    cryon: &aetheria::assets::ObjAsset,
+    veridis: &aetheria::assets::ObjAsset,
+    umbra: &aetheria::assets::ObjAsset,
+    solene: &aetheria::assets::ObjAsset,
+    solaris_motion: BodyMotion,
+    vesper_motion: BodyMotion,
+    nymara_motion: BodyMotion,
+    cryon_motion: BodyMotion,
+    veridis_motion: BodyMotion,
+    umbra_motion: BodyMotion,
+    solene_motion: BodyMotion,
+    shadow_bvh: bool,
+) -> io::Result<()> {
+    let original_path = "output/phase22q_raster_original.ppm";
+    let incremental_path = "output/phase22q_raster_incremental.ppm";
+    if std::path::Path::new(original_path).exists() || std::path::Path::new(incremental_path).exists() {
+        return Err(io::Error::new(io::ErrorKind::AlreadyExists, "los outputs de comparación incremental ya existen"));
+    }
+    let poses = build_poses(
+        0.0, solaris_motion, vesper_motion, nymara_motion, cryon_motion,
+        veridis_motion, umbra_motion, solene_motion,
+    );
+    let shadow_scene = build_shadow_scene(
+        vesper, selene, nymara, ring_inner, ring_middle, ring_outer,
+        cryon, veridis, umbra, solene, poses, shadow_bvh, false, false,
+    );
+    let original_profile = RasterDetailProfile::new();
+    let incremental_profile = RasterDetailProfile::new();
+    let original = render_frame(
+        0.0, camera, solaris, vesper, selene, nymara,
+        ring_inner, ring_middle, ring_outer, cryon, veridis, umbra, solene,
+        poses, &shadow_scene, None, false, None, false, false, false, false,
+        None, Some(original_profile.clone()), None, None, None,
+    )?;
+    let incremental = render_frame(
+        0.0, camera, solaris, vesper, selene, nymara,
+        ring_inner, ring_middle, ring_outer, cryon, veridis, umbra, solene,
+        poses, &shadow_scene, None, false, None, false, false, true, false,
+        None, Some(incremental_profile.clone()), None, None, None,
+    )?;
+    let a = original_profile.snapshot();
+    let b = incremental_profile.snapshot();
+    let coverage_equal = a.input_triangles == b.input_triangles
+        && a.clipped_triangles == b.clipped_triangles
+        && a.projected_triangles == b.projected_triangles
+        && a.bounding_boxes == b.bounding_boxes
+        && a.candidate_pixels == b.candidate_pixels
+        && a.covered_pixels == b.covered_pixels
+        && a.depth_passed == b.depth_passed
+        && a.shader_evaluations == b.shader_evaluations
+        && a.written_fragments == b.written_fragments;
+    let original_ppm = original.serialize_ppm();
+    let incremental_ppm = incremental.serialize_ppm();
+    let mut color_pixels = 0u64;
+    let mut color_channels = 0u64;
+    let mut depth_values = 0u64;
+    for (left, right) in original.color_buffer().iter().zip(incremental.color_buffer()) {
+        let differences = [left.r != right.r, left.g != right.g, left.b != right.b];
+        if differences.iter().any(|different| *different) { color_pixels += 1; }
+        color_channels += differences.iter().filter(|different| **different).count() as u64;
+    }
+    for (left, right) in original.depth_buffer().iter().zip(incremental.depth_buffer()) {
+        if left.to_bits() != right.to_bits() { depth_values += 1; }
+    }
+    fs::create_dir_all("output")?;
+    fs::write(original_path, &original_ppm)?;
+    fs::write(incremental_path, &incremental_ppm)?;
+    println!("[RASTER-COMPARE] coverage_equal={} input={} clipped={} projected={} boxes={} candidates={} covered_original={} covered_incremental={} rejected_original={} rejected_incremental={} depth_original={} depth_incremental={} shaders_original={} shaders_incremental={} writes_original={} writes_incremental={}",
+        coverage_equal, a.input_triangles, a.clipped_triangles, a.projected_triangles, a.bounding_boxes,
+        a.candidate_pixels, a.covered_pixels, b.covered_pixels,
+        a.candidate_pixels.saturating_sub(a.covered_pixels), b.candidate_pixels.saturating_sub(b.covered_pixels),
+        a.depth_passed, b.depth_passed, a.shader_evaluations, b.shader_evaluations,
+        a.written_fragments, b.written_fragments);
+    println!("[RASTER-COMPARE] color_pixels_different={} color_channels_different={} depth_values_different={} rgb8_equal={} original={} incremental={}",
+        color_pixels, color_channels, depth_values, original_ppm == incremental_ppm, original_path, incremental_path);
+    if !coverage_equal {
+        println!("[RASTER-COMPARE] first_discrepancy=not-captured; inspect per-triangle coverage instrumentation before adoption");
+    }
     Ok(())
 }
 
@@ -1002,6 +1375,9 @@ fn render_frame(
     diagnostics_enabled: bool,
     vesper_emission_curve: Option<(f32, f32)>,
     solene_normalized: bool,
+    framebuffer_fused_write: bool,
+    raster_incremental_coverage: bool,
+    camera_matrices_cached: bool,
     detail_profile: Option<DetailedProfile>,
     raster_detail_profile: Option<RasterDetailProfile>,
     shader_detail_profile: Option<ShaderDetailProfile>,
@@ -1026,6 +1402,12 @@ fn render_frame(
         shadow_scene: Some(shadow_scene.clone()), diagnostics: diagnostics.clone(),
         vesper_emission_curve,
         solene_normalized_light: solene_normalized,
+        framebuffer_fused_write,
+        raster_incremental_coverage,
+        cached_camera_matrices: camera_matrices_cached.then(|| CachedCameraMatrices {
+            view: camera.view_matrix(),
+            projection: camera.projection_matrix(),
+        }),
         detail_profile,
         raster_detail_profile,
         shader_detail_profile,

@@ -11,6 +11,12 @@ pub struct Framebuffer {
     depths: Vec<f32>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DepthPass {
+    index: usize,
+    depth: f32,
+}
+
 impl Framebuffer {
     pub fn new(width: usize, height: usize) -> Result<Self, String> {
         if width == 0 || height == 0 {
@@ -61,6 +67,10 @@ impl Framebuffer {
         &self.colors
     }
 
+    pub fn depth_buffer(&self) -> &[f32] {
+        &self.depths
+    }
+
     pub fn restore_colors(&mut self, colors: &[Color]) -> bool {
         if colors.len() != self.colors.len() {
             return false;
@@ -85,6 +95,29 @@ impl Framebuffer {
         self.index(x, y)
             .map(|index| depth.is_finite() && depth < self.depths[index])
             .unwrap_or(false)
+    }
+
+    pub(crate) fn depth_test_and_reserve(&self, x: usize, y: usize, depth: f32) -> Option<DepthPass> {
+        let index = self.index(x, y)?;
+        (depth.is_finite() && depth < self.depths[index]).then_some(DepthPass { index, depth })
+    }
+
+    pub(crate) fn write_reserved_pixel(&mut self, pass: DepthPass, color: Color) -> bool {
+        self.colors[pass.index] = color;
+        self.depths[pass.index] = pass.depth;
+        true
+    }
+
+    pub fn depth_test_and_write_pixel(&mut self, x: usize, y: usize, color: Color, depth: f32) -> bool {
+        let Some(index) = self.index(x, y) else {
+            return false;
+        };
+        if !depth.is_finite() || depth >= self.depths[index] {
+            return false;
+        }
+        self.colors[index] = color;
+        self.depths[index] = depth;
+        true
     }
 
     pub fn write_pixel(&mut self, x: usize, y: usize, color: Color, depth: f32) -> bool {

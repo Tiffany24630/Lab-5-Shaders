@@ -4,7 +4,7 @@ use crate::framebuffer::Framebuffer;
 use crate::geometry::{Mesh, Triangle3D};
 use crate::math::{Mat4, Vec2, Vec3, Vec4};
 use crate::rasterizer::{PerspectiveRasterVertex, rasterize_triangle_with_shader};
-use crate::shader::{FragmentShader, ShaderUniforms, VertexColorShader};
+use crate::shader::{CachedCameraMatrices, FragmentShader, ShaderUniforms, VertexColorShader};
 use std::time::Instant;
 
 const CLIP_EPSILON: f32 = 1.0e-6;
@@ -78,8 +78,11 @@ pub fn render_triangle_with_shader<S: FragmentShader>(
     if let Some(profile) = &uniforms.raster_detail_profile { profile.add_input(); }
     let transform_started = uniforms.raster_detail_profile.as_ref().map(|_| Instant::now());
     let preparation_started = uniforms.detail_profile.as_ref().map(|_| Instant::now());
-    let view = camera.view_matrix();
-    let transform = camera.projection_matrix() * view * model;
+    let (view, projection) = uniforms
+        .cached_camera_matrices
+        .map(|matrices: CachedCameraMatrices| (matrices.view, matrices.projection))
+        .unwrap_or_else(|| (camera.view_matrix(), camera.projection_matrix()));
+    let transform = projection * view * model;
     let vertices = triangle.vertices.map(|vertex| ClipVertex {
         position: transform
             * Vec4::new(vertex.position.x, vertex.position.y, vertex.position.z, 1.0),
