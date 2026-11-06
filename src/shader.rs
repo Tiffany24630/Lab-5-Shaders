@@ -3,6 +3,7 @@ use crate::diagnostics::{DiagnosticObject, DiagnosticSample, DiagnosticsHandle, 
 use crate::math::{Mat4, NormalTransform, Vec2, Vec3};
 use crate::profile::{DetailedProfile, ProceduralDetailProfile, RasterDetailProfile, ShaderDetailProfile};
 use std::sync::Arc;
+use std::sync::Mutex;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FragmentInput {
@@ -21,7 +22,32 @@ pub struct CachedCameraMatrices {
     pub projection: Mat4,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default)]
+pub struct ClipBufferStats {
+    pub input_triangles: u64,
+    pub planes_processed: u64,
+    pub vec_constructions: u64,
+    pub capacity_growth_events: u64,
+    pub max_capacity_a: usize,
+    pub max_capacity_b: usize,
+    pub vertices_written: u64,
+    pub vertices_processed: u64,
+    pub empty_polygons: u64,
+    pub final_triangles: u64,
+    pub triangles_inside: u64,
+    pub triangles_outside: u64,
+    pub triangles_crossing: u64,
+    pub vertices_written_by_plane: [u64; 6],
+    pub vertices_processed_by_plane: [u64; 6],
+    pub polygon_vertices_by_plane: [u64; 6],
+    pub max_polygon_vertices: usize,
+    pub retained_capacity_events: u64,
+    pub empty_buffer_a_events: u64,
+    pub empty_buffer_b_events: u64,
+    pub capacity_bins: [u64; 9],
+}
+
+#[derive(Clone, Debug)]
 pub struct ShaderUniforms {
     pub time: f32,
     pub camera_position: Vec3,
@@ -44,6 +70,8 @@ pub struct ShaderUniforms {
     pub raster_incremental_coverage: bool,
     pub cached_camera_matrices: Option<CachedCameraMatrices>,
     pub cached_normal_transform: Option<NormalTransform>,
+    pub clip_buffers_reused: bool,
+    pub clip_buffer_stats: Option<Arc<Mutex<ClipBufferStats>>>,
     pub parameters: [f32; 8],
 }
 
@@ -71,6 +99,8 @@ impl Default for ShaderUniforms {
             raster_incremental_coverage: false,
             cached_camera_matrices: None,
             cached_normal_transform: None,
+            clip_buffers_reused: false,
+            clip_buffer_stats: None,
             parameters: [0.0; 8],
         }
     }

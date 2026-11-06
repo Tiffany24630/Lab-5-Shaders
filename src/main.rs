@@ -1,6 +1,6 @@
 use std::fs;
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 #[cfg(feature = "interactive")]
 use std::time::Duration;
@@ -19,12 +19,12 @@ use aetheria::framebuffer::Framebuffer;
 #[cfg(feature = "interactive")]
 use aetheria::hud::{self, HudState};
 use aetheria::math::{Mat4, Vec3};
-use aetheria::pipeline::render_mesh_with_shader;
+use aetheria::pipeline::{compare_mesh_clipping, render_mesh_with_shader, run_clip_buffers_stage_diagnostic, ClipStageDiagnosticReport};
 use aetheria::procedural::{fbm_comparison_stats, fbm_normalization_table_matches_original, set_fbm_comparison, set_fbm_precomputed, FBM_NORMALIZATION_TABLE};
 use aetheria::profile::{DetailedProfile, DetailedProfileStats, ProceduralDetailProfile, ProceduralDetailStats, RasterDetailProfile, RasterDetailStats, ShaderDetailProfile, ShaderDetailStats};
 use aetheria::orbit_camera::OrbitCameraController;
 use aetheria::scene::{BodyId, BodyPose, BodyPoses};
-use aetheria::shader::{CachedCameraMatrices, ShaderUniforms};
+use aetheria::shader::{CachedCameraMatrices, ClipBufferStats, ShaderUniforms};
 use aetheria::shaders::cryon::CryonShader;
 use aetheria::shaders::nymara::{NymaraRingShader, NymaraShader};
 use aetheria::shaders::selene::SeleneShader;
@@ -269,6 +269,11 @@ fn main() -> io::Result<()> {
     let mut normal_transform_cached = false;
     let mut normal_transform_compare = false;
     let mut benchmark_normal_transform = false;
+    let mut clip_buffers_reused = false;
+    let mut clip_buffers_compare = false;
+    let mut clip_buffers_stress_compare = false;
+    let mut clip_buffers_multicamera = false;
+    let mut benchmark_clip_buffers = false;
     let mut preview = None;
     let mut arguments = env::args().skip(1);
     while let Some(argument) = arguments.next() {
@@ -331,13 +336,18 @@ fn main() -> io::Result<()> {
             "--normal-transform-cached" => normal_transform_cached = true,
             "--normal-transform-compare" => normal_transform_compare = true,
             "--benchmark-normal-transform" => benchmark_normal_transform = true,
+            "--clip-buffers-reused" => clip_buffers_reused = true,
+            "--clip-buffers-compare" => clip_buffers_compare = true,
+            "--clip-buffers-stress-compare" => clip_buffers_stress_compare = true,
+            "--clip-buffers-multicamera" => clip_buffers_multicamera = true,
+            "--benchmark-clip-buffers" => benchmark_clip_buffers = true,
             "--preview" => {
                 let value = arguments.next().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "--preview requiere original, A, B o C"))?;
                 preview = Some(PreviewCurve::parse(&value).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "preview invalido: use original, A, B o C"))?);
                 diagnostics = true;
             }
             _ => {
-                eprintln!("Uso: aetheria [--offline] [--interactive] [--diagnostics] [--diagnostics-only] [--preview original|A|B|C] [--profile] [--profile-detail] [--profile-raster-detail] [--profile-shader-detail] [--profile-procedural-detail] [--benchmark-static] [--benchmark-fbm] [--benchmark-framebuffer-write] [--benchmark-camera-matrices] [--benchmark-normal-transform] [--framebuffer-fused-write] [--framebuffer-fused-compare] [--raster-incremental-coverage] [--raster-incremental-compare] [--camera-matrices-cached] [--camera-matrices-compare] [--normal-transform-cached] [--normal-transform-compare] [--shadow-bvh] [--shadow-brute-force] [--shadow-compare] [--shadow-compare-all] [--solene-normalized] [--solene-experiment-original] [--fbm-original|--fbm-precomputed|--fbm-compare]");
+                eprintln!("Uso: aetheria [--offline] [--interactive] [--diagnostics] [--diagnostics-only] [--preview original|A|B|C] [--profile] [--profile-detail] [--profile-raster-detail] [--profile-shader-detail] [--profile-procedural-detail] [--benchmark-static] [--benchmark-framebuffer-write] [--benchmark-camera-matrices] [--benchmark-normal-transform] [--benchmark-clip-buffers] [--framebuffer-fused-write] [--framebuffer-fused-compare] [--raster-incremental-coverage] [--raster-incremental-compare] [--camera-matrices-cached] [--camera-matrices-compare] [--normal-transform-cached] [--normal-transform-compare] [--clip-buffers-reused] [--clip-buffers-compare] [--clip-buffers-stress-compare] [--clip-buffers-multicamera] [--shadow-bvh] [--shadow-brute-force] [--shadow-compare] [--shadow-compare-all] [--solene-normalized] [--solene-experiment-original] [--fbm-original|--fbm-precomputed|--fbm-compare]");
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "argumento desconocido"));
             }
         }
@@ -393,6 +403,18 @@ fn main() -> io::Result<()> {
     if benchmark_normal_transform && camera_matrices_cached {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "--benchmark-normal-transform no se combina con --camera-matrices-cached"));
     }
+    if clip_buffers_compare && !diagnostics_only {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "--clip-buffers-compare requiere --diagnostics-only"));
+    }
+    if clip_buffers_stress_compare && !diagnostics_only {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "--clip-buffers-stress-compare requiere --diagnostics-only"));
+    }
+    if clip_buffers_multicamera && !diagnostics_only {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "--clip-buffers-multicamera requiere --diagnostics-only"));
+    }
+    if benchmark_clip_buffers && interactive {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "--benchmark-clip-buffers requiere el modo offline"));
+    }
     if benchmark_framebuffer && interactive {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "--benchmark-framebuffer-write requiere el modo offline"));
     }
@@ -405,7 +427,7 @@ fn main() -> io::Result<()> {
     if interactive {
         #[cfg(feature = "interactive")]
         {
-            return run_app(true, diagnostics, diagnostics_only, preview, profile, profile_detail, profile_raster_detail, profile_shader_detail, profile_procedural_detail, benchmark_static, shadow_bvh, shadow_compare, shadow_compare_all, solene_normalized, solene_experiment_original, fbm_precomputed, fbm_original, fbm_compare, benchmark_fbm, framebuffer_fused_write, framebuffer_compare, benchmark_framebuffer, raster_incremental_coverage, raster_incremental_compare, camera_matrices_cached, camera_matrices_compare, benchmark_camera_matrices, normal_transform_cached, normal_transform_compare, benchmark_normal_transform);
+            return run_app(true, diagnostics, diagnostics_only, preview, profile, profile_detail, profile_raster_detail, profile_shader_detail, profile_procedural_detail, benchmark_static, shadow_bvh, shadow_compare, shadow_compare_all, solene_normalized, solene_experiment_original, fbm_precomputed, fbm_original, fbm_compare, benchmark_fbm, framebuffer_fused_write, framebuffer_compare, benchmark_framebuffer, raster_incremental_coverage, raster_incremental_compare, camera_matrices_cached, camera_matrices_compare, benchmark_camera_matrices, normal_transform_cached, normal_transform_compare, benchmark_normal_transform, clip_buffers_reused, clip_buffers_compare, clip_buffers_stress_compare, clip_buffers_multicamera, benchmark_clip_buffers);
         }
         #[cfg(not(feature = "interactive"))]
         {
@@ -413,10 +435,10 @@ fn main() -> io::Result<()> {
             return Err(io::Error::new(io::ErrorKind::Unsupported, "feature interactive no habilitada"));
         }
     }
-    run_app(false, diagnostics, diagnostics_only, preview, profile, profile_detail, profile_raster_detail, profile_shader_detail, profile_procedural_detail, benchmark_static, shadow_bvh, shadow_compare, shadow_compare_all, solene_normalized, solene_experiment_original, fbm_precomputed, fbm_original, fbm_compare, benchmark_fbm, framebuffer_fused_write, framebuffer_compare, benchmark_framebuffer, raster_incremental_coverage, raster_incremental_compare, camera_matrices_cached, camera_matrices_compare, benchmark_camera_matrices, normal_transform_cached, normal_transform_compare, benchmark_normal_transform)
+    run_app(false, diagnostics, diagnostics_only, preview, profile, profile_detail, profile_raster_detail, profile_shader_detail, profile_procedural_detail, benchmark_static, shadow_bvh, shadow_compare, shadow_compare_all, solene_normalized, solene_experiment_original, fbm_precomputed, fbm_original, fbm_compare, benchmark_fbm, framebuffer_fused_write, framebuffer_compare, benchmark_framebuffer, raster_incremental_coverage, raster_incremental_compare, camera_matrices_cached, camera_matrices_compare, benchmark_camera_matrices, normal_transform_cached, normal_transform_compare, benchmark_normal_transform, clip_buffers_reused, clip_buffers_compare, clip_buffers_stress_compare, clip_buffers_multicamera, benchmark_clip_buffers)
 }
 
-fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool, preview: Option<PreviewCurve>, profile_enabled: bool, profile_detail: bool, profile_raster_detail: bool, profile_shader_detail: bool, profile_procedural_detail: bool, benchmark_static: bool, shadow_bvh: bool, shadow_compare: bool, shadow_compare_all: bool, solene_normalized: bool, solene_experiment_original: bool, fbm_precomputed: bool, fbm_original: bool, fbm_compare: bool, benchmark_fbm: bool, framebuffer_fused_write: bool, framebuffer_compare: bool, benchmark_framebuffer: bool, raster_incremental_coverage: bool, raster_incremental_compare: bool, camera_matrices_cached: bool, camera_matrices_compare: bool, benchmark_camera_matrices: bool, normal_transform_cached: bool, normal_transform_compare: bool, benchmark_normal_transform: bool) -> io::Result<()> {
+fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool, preview: Option<PreviewCurve>, profile_enabled: bool, profile_detail: bool, profile_raster_detail: bool, profile_shader_detail: bool, profile_procedural_detail: bool, benchmark_static: bool, shadow_bvh: bool, shadow_compare: bool, shadow_compare_all: bool, solene_normalized: bool, solene_experiment_original: bool, fbm_precomputed: bool, fbm_original: bool, fbm_compare: bool, benchmark_fbm: bool, framebuffer_fused_write: bool, framebuffer_compare: bool, benchmark_framebuffer: bool, raster_incremental_coverage: bool, raster_incremental_compare: bool, camera_matrices_cached: bool, camera_matrices_compare: bool, benchmark_camera_matrices: bool, normal_transform_cached: bool, normal_transform_compare: bool, benchmark_normal_transform: bool, clip_buffers_reused: bool, clip_buffers_compare: bool, clip_buffers_stress_compare: bool, clip_buffers_multicamera: bool, benchmark_clip_buffers: bool) -> io::Result<()> {
     #[cfg(not(feature = "interactive"))]
     let _ = profile_enabled;
     #[cfg(not(feature = "interactive"))]
@@ -460,6 +482,15 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
     )
     .map_err(io::Error::other)?;
 
+    if clip_buffers_stress_compare {
+        let report = run_clip_buffers_stage_diagnostic();
+        println!("[CLIP-BUFFERS-STRESS] cases={} polygons_compared={} planes_compared={} vertices_compared={} vertex_count_differences={} order_differences={} position_differences={} attribute_differences={} triangulation_differences={} original_max_vertices={} reused_max_vertices={} original_initial_capacity={} reused_initial_capacity_a={} reused_initial_capacity_b={}", report.cases, report.polygons_compared, report.planes_compared, report.vertices_compared, report.vertex_count_differences, report.order_differences, report.position_differences, report.attribute_differences, report.triangulation_differences, report.original_max_vertices, report.reused_max_vertices, report.original_initial_capacity, report.reused_initial_capacity_a, report.reused_initial_capacity_b);
+        println!("[CLIP-BUFFERS-STRESS] original vec_constructions={} capacity_changes_observed={} max_capacity={} vertices_written={} vertices_processed={} empty_polygons={} final_triangles={}", report.original.vec_constructions, report.original.capacity_growth_events, report.original.max_capacity_a, report.original.vertices_written, report.original.vertices_processed, report.original.empty_polygons, report.original.final_triangles);
+        println!("[CLIP-BUFFERS-STRESS] reused vec_constructions={} capacity_changes_observed={} max_capacity_a={} max_capacity_b={} vertices_written={} vertices_processed={} empty_polygons={} final_triangles={}", report.reused.vec_constructions, report.reused.capacity_growth_events, report.reused.max_capacity_a, report.reused.max_capacity_b, report.reused.vertices_written, report.reused.vertices_processed, report.reused.empty_polygons, report.reused.final_triangles);
+        println!("[CLIP-BUFFERS-STRESS] first_discrepancy={}", report.first_discrepancy.as_deref().unwrap_or("none"));
+        return Ok(());
+    }
+
     let solaris_motion = BodyMotion {
         orbit: Orbit { center: Vec3::ZERO, radius: 0.0, angular_velocity: 0.0, phase: 0.0, inclination: 0.0 },
         base_rotation: Mat4::identity(), scale: 0.70, rotation_axis: RotationAxis::Y,
@@ -496,6 +527,15 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
         rotation_speed: 0.07, rotation_phase: 0.0,
     };
 
+    if clip_buffers_multicamera {
+        return run_clip_buffers_multicamera(
+            &camera, &solaris, &vesper, &selene, &nymara, &ring_inner, &ring_middle,
+            &ring_outer, &cryon, &veridis, &umbra, &solene, solaris_motion, vesper_motion,
+            nymara_motion, cryon_motion, veridis_motion, umbra_motion, solene_motion,
+            shadow_bvh, false,
+        );
+    }
+
     if benchmark_fbm {
         return run_fbm_benchmark(
             &camera, &solaris, &vesper, &selene, &nymara, &ring_inner, &ring_middle,
@@ -512,12 +552,12 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
             shadow_bvh, framebuffer_fused_write, raster_incremental_coverage,
         );
     }
-    if benchmark_camera_matrices || benchmark_normal_transform {
+    if benchmark_camera_matrices || benchmark_normal_transform || benchmark_clip_buffers {
         return run_camera_matrices_benchmark(
             &camera, &solaris, &vesper, &selene, &nymara, &ring_inner, &ring_middle,
             &ring_outer, &cryon, &veridis, &umbra, &solene, solaris_motion, vesper_motion,
             nymara_motion, cryon_motion, veridis_motion, umbra_motion, solene_motion,
-            shadow_bvh, benchmark_normal_transform,
+            shadow_bvh, benchmark_normal_transform, benchmark_clip_buffers,
         );
     }
     if framebuffer_compare {
@@ -561,7 +601,7 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
         let mut framebuffer = render_frame(
             clock.time(), &interactive_camera, &solaris, &vesper, &selene, &nymara,
             &ring_inner, &ring_middle, &ring_outer, &cryon, &veridis, &umbra,
-            &solene, poses, &shadow_scene, Some(&background_colors), diagnostics_enabled, None, solene_normalized, framebuffer_fused_write, raster_incremental_coverage, camera_matrices_cached, false, false, None, None, None, None, None,
+            &solene, poses, &shadow_scene, Some(&background_colors), diagnostics_enabled, None, solene_normalized, framebuffer_fused_write, raster_incremental_coverage, camera_matrices_cached, false, false, clip_buffers_reused, None, None, None, None, None, None,
         )?;
         let mut clean_colors = framebuffer.color_buffer().to_vec();
         hud::draw(&mut framebuffer, HudState {
@@ -724,7 +764,7 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
                 let updated = render_frame(
                     clock.time(), &current_camera, &solaris, &vesper, &selene, &nymara,
                     &ring_inner, &ring_middle, &ring_outer, &cryon, &veridis, &umbra,
-                    &solene, poses, &shadow_scene, Some(&background_colors), diagnostics_enabled, None, solene_normalized, framebuffer_fused_write, raster_incremental_coverage, camera_matrices_cached, false, false, detail_profile.clone(), raster_detail_profile.clone(), shader_detail_profile.clone(), procedural_detail_profile.clone(), Some(&mut profile_frame),
+                    &solene, poses, &shadow_scene, Some(&background_colors), diagnostics_enabled, None, solene_normalized, framebuffer_fused_write, raster_incremental_coverage, camera_matrices_cached, false, false, clip_buffers_reused, None, detail_profile.clone(), raster_detail_profile.clone(), shader_detail_profile.clone(), procedural_detail_profile.clone(), Some(&mut profile_frame),
                 )?;
                 if let Some(detail_profile) = detail_profile {
                     profile_frame.detail = detail_profile.snapshot();
@@ -853,6 +893,31 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
             &cryon, &veridis, &umbra, &solene, poses, shadow_bvh, shadow_compare, shadow_compare_all,
         );
         println!("[SHADOW-ROUTE] mode={} bvh_nodes={} bvh_depth={}", if shadow_scene.uses_bvh() { "BVH" } else { "brute-force" }, shadow_scene.bvh_node_count(), shadow_scene.bvh_max_depth());
+        if clip_buffers_compare {
+            let original_stats = Arc::new(Mutex::new(ClipBufferStats::default()));
+            let reused_stats = Arc::new(Mutex::new(ClipBufferStats::default()));
+            let original = render_frame(
+                time, &frame_camera, &solaris, &vesper, &selene, &nymara,
+                &ring_inner, &ring_middle, &ring_outer, &cryon, &veridis, &umbra, &solene,
+                poses, &shadow_scene, None, diagnostics_enabled, preview.and_then(PreviewCurve::parameters), solene_normalized, framebuffer_fused_write, raster_incremental_coverage, false, false, false, false, Some(original_stats.clone()), None, None, None, None, None,
+            )?;
+            let reused = render_frame(
+                time, &frame_camera, &solaris, &vesper, &selene, &nymara,
+                &ring_inner, &ring_middle, &ring_outer, &cryon, &veridis, &umbra, &solene,
+                poses, &shadow_scene, None, diagnostics_enabled, preview.and_then(PreviewCurve::parameters), solene_normalized, framebuffer_fused_write, raster_incremental_coverage, false, false, false, true, Some(reused_stats.clone()), None, None, None, None, None,
+            )?;
+            let original_stats = original_stats.lock().map(|stats| stats.clone()).unwrap_or_default();
+            let reused_stats = reused_stats.lock().map(|stats| stats.clone()).unwrap_or_default();
+            let color_differences = original.color_buffer().iter().zip(reused.color_buffer()).filter(|(a, b)| a != b).count();
+            let depth_differences = original.depth_buffer().iter().zip(reused.depth_buffer()).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+            let original_rgb8 = original.serialize_ppm();
+            let reused_rgb8 = reused.serialize_ppm();
+            let rgb8_differences = original_rgb8.iter().zip(&reused_rgb8).filter(|(a, b)| a != b).count();
+            println!("[CLIP-BUFFERS-COMPARE] original input_triangles={} planes={} vec_constructions={} capacity_growth_events={} max_capacity_a={} max_capacity_b={} vertices_written={} vertices_processed={} empty_polygons={} final_triangles={}", original_stats.input_triangles, original_stats.planes_processed, original_stats.vec_constructions, original_stats.capacity_growth_events, original_stats.max_capacity_a, original_stats.max_capacity_b, original_stats.vertices_written, original_stats.vertices_processed, original_stats.empty_polygons, original_stats.final_triangles);
+            println!("[CLIP-BUFFERS-COMPARE] reused input_triangles={} planes={} vec_constructions={} capacity_growth_events={} max_capacity_a={} max_capacity_b={} vertices_written={} vertices_processed={} empty_polygons={} final_triangles={}", reused_stats.input_triangles, reused_stats.planes_processed, reused_stats.vec_constructions, reused_stats.capacity_growth_events, reused_stats.max_capacity_a, reused_stats.max_capacity_b, reused_stats.vertices_written, reused_stats.vertices_processed, reused_stats.empty_polygons, reused_stats.final_triangles);
+            println!("[CLIP-BUFFERS-COMPARE] pixels={} color_differences={} depth_differences={} rgb8_bytes={} rgb8_differences={} polygon_vertex_order=not_instrumented projected_values=not_instrumented", original.color_buffer().len(), color_differences, depth_differences, original_rgb8.len(), rgb8_differences);
+            break;
+        }
         if normal_transform_compare {
             let objects = [
                 (&solaris.mesh, poses.get(BodyId::Solaris).model_matrix),
@@ -888,12 +953,12 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
             let original = render_frame(
                 time, &frame_camera, &solaris, &vesper, &selene, &nymara,
                 &ring_inner, &ring_middle, &ring_outer, &cryon, &veridis, &umbra, &solene,
-                poses, &shadow_scene, None, diagnostics_enabled, preview.and_then(PreviewCurve::parameters), solene_normalized, framebuffer_fused_write, raster_incremental_coverage, false, false, false, None, None, None, None, None,
+                poses, &shadow_scene, None, diagnostics_enabled, preview.and_then(PreviewCurve::parameters), solene_normalized, framebuffer_fused_write, raster_incremental_coverage, false, false, false, false, None, None, None, None, None, None,
             )?;
             let experimental = render_frame(
                 time, &frame_camera, &solaris, &vesper, &selene, &nymara,
                 &ring_inner, &ring_middle, &ring_outer, &cryon, &veridis, &umbra, &solene,
-                poses, &shadow_scene, None, diagnostics_enabled, preview.and_then(PreviewCurve::parameters), solene_normalized, framebuffer_fused_write, raster_incremental_coverage, false, false, true, None, None, None, None, None,
+                poses, &shadow_scene, None, diagnostics_enabled, preview.and_then(PreviewCurve::parameters), solene_normalized, framebuffer_fused_write, raster_incremental_coverage, false, false, true, false, None, None, None, None, None, None,
             )?;
             let color_differences = original.color_buffer().iter().zip(experimental.color_buffer()).filter(|(a, b)| a != b).count();
             let depth_differences = original.depth_buffer().iter().zip(experimental.depth_buffer()).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
@@ -910,12 +975,12 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
             let original = render_frame(
                 time, &frame_camera, &solaris, &vesper, &selene, &nymara,
                 &ring_inner, &ring_middle, &ring_outer, &cryon, &veridis, &umbra, &solene,
-                poses, &shadow_scene, None, diagnostics_enabled, preview.and_then(PreviewCurve::parameters), solene_normalized, framebuffer_fused_write, raster_incremental_coverage, false, false, false, None, None, None, None, None,
+                poses, &shadow_scene, None, diagnostics_enabled, preview.and_then(PreviewCurve::parameters), solene_normalized, framebuffer_fused_write, raster_incremental_coverage, false, false, false, false, None, None, None, None, None, None,
             )?;
             let cached = render_frame(
                 time, &frame_camera, &solaris, &vesper, &selene, &nymara,
                 &ring_inner, &ring_middle, &ring_outer, &cryon, &veridis, &umbra, &solene,
-                poses, &shadow_scene, None, diagnostics_enabled, preview.and_then(PreviewCurve::parameters), solene_normalized, framebuffer_fused_write, raster_incremental_coverage, true, false, false, None, None, None, None, None,
+                poses, &shadow_scene, None, diagnostics_enabled, preview.and_then(PreviewCurve::parameters), solene_normalized, framebuffer_fused_write, raster_incremental_coverage, true, false, false, false, None, None, None, None, None, None,
             )?;
             let color_differences = original.color_buffer().iter().zip(cached.color_buffer())
                 .filter(|(a, b)| a != b).count();
@@ -934,7 +999,7 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
         let framebuffer = render_frame(
             time, &frame_camera, &solaris, &vesper, &selene, &nymara,
             &ring_inner, &ring_middle, &ring_outer, &cryon, &veridis, &umbra, &solene,
-            poses, &shadow_scene, None, diagnostics_enabled, preview.and_then(PreviewCurve::parameters), solene_normalized, framebuffer_fused_write, raster_incremental_coverage, camera_matrices_cached, false, normal_transform_cached, None, None, None, None, None,
+            poses, &shadow_scene, None, diagnostics_enabled, preview.and_then(PreviewCurve::parameters), solene_normalized, framebuffer_fused_write, raster_incremental_coverage, camera_matrices_cached, false, normal_transform_cached, clip_buffers_reused, None, None, None, None, None, None,
         )?;
         if !diagnostics_only {
             fs::create_dir_all("output")?;
@@ -967,6 +1032,159 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
         }
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_clip_buffers_multicamera(
+    camera: &Camera,
+    solaris: &aetheria::assets::ObjAsset,
+    vesper: &aetheria::assets::ObjAsset,
+    selene: &aetheria::assets::ObjAsset,
+    nymara: &aetheria::assets::ObjAsset,
+    ring_inner: &aetheria::assets::ObjAsset,
+    ring_middle: &aetheria::assets::ObjAsset,
+    ring_outer: &aetheria::assets::ObjAsset,
+    cryon: &aetheria::assets::ObjAsset,
+    veridis: &aetheria::assets::ObjAsset,
+    umbra: &aetheria::assets::ObjAsset,
+    solene: &aetheria::assets::ObjAsset,
+    solaris_motion: BodyMotion,
+    vesper_motion: BodyMotion,
+    nymara_motion: BodyMotion,
+    cryon_motion: BodyMotion,
+    veridis_motion: BodyMotion,
+    umbra_motion: BodyMotion,
+    solene_motion: BodyMotion,
+    shadow_bvh: bool,
+    include_benchmark: bool,
+) -> io::Result<()> {
+    let poses = build_poses(0.0, solaris_motion, vesper_motion, nymara_motion, cryon_motion, veridis_motion, umbra_motion, solene_motion);
+    let shadow_scene = build_shadow_scene(vesper, selene, nymara, ring_inner, ring_middle, ring_outer, cryon, veridis, umbra, solene, poses, shadow_bvh, false, false);
+    let mut cameras = vec![("static", *camera)];
+    for (name, target, distance) in [
+        ("orbit-solaris", BodyId::Solaris, 5.0),
+        ("orbit-vesper", BodyId::Vesper, 4.8),
+        ("orbit-selene-close", BodyId::Selene, 2.0),
+        ("orbit-nymara-far", BodyId::Nymara, 6.2),
+    ] {
+        let mut controller = OrbitCameraController::new(target, camera.fov_y, camera.aspect, camera.near, camera.far);
+        controller.set_orbit(std::f32::consts::FRAC_PI_2, 0.30, distance);
+        cameras.push((name, controller.camera_for_target(poses.get(target).world_position).map_err(io::Error::other)?));
+    }
+    let objects = [
+        ("Solaris", &solaris.mesh, poses.get(BodyId::Solaris).model_matrix),
+        ("Vesper", &vesper.mesh, poses.get(BodyId::Vesper).model_matrix),
+        ("Selene", &selene.mesh, poses.get(BodyId::Selene).model_matrix),
+        ("Nymara", &nymara.mesh, poses.get(BodyId::Nymara).model_matrix),
+        ("ring-inner", &ring_inner.mesh, poses.get(BodyId::Nymara).model_matrix),
+        ("ring-middle", &ring_middle.mesh, poses.get(BodyId::Nymara).model_matrix),
+        ("ring-outer", &ring_outer.mesh, poses.get(BodyId::Nymara).model_matrix),
+        ("Cryon", &cryon.mesh, poses.get(BodyId::Cryon).model_matrix),
+        ("Veridis", &veridis.mesh, poses.get(BodyId::Veridis).model_matrix),
+        ("Umbra", &umbra.mesh, poses.get(BodyId::Umbra).model_matrix),
+        ("Solene", &solene.mesh, poses.get(BodyId::Solene).model_matrix),
+    ];
+    const WARMUP: usize = 10;
+    const MEASURED: usize = 60;
+    let order = [false, true, true, false, false, true, true, false, false, true];
+    for (name, selected_camera) in cameras {
+        let mut equivalence = ClipStageDiagnosticReport::default();
+        for (_, mesh, model) in objects {
+            let report = compare_mesh_clipping(mesh, model, &selected_camera);
+            merge_clip_stage_report(&mut equivalence, &report);
+        }
+        println!("[CLIP-MULTICAMERA-EQUIV] config={} cases={} polygons={} planes={} vertices={} count_diff={} order_diff={} position_diff={} attribute_diff={} triangulation_diff={} max_vertices_original={} max_vertices_reused={} first_discrepancy={}", name, equivalence.cases, equivalence.polygons_compared, equivalence.planes_compared, equivalence.vertices_compared, equivalence.vertex_count_differences, equivalence.order_differences, equivalence.position_differences, equivalence.attribute_differences, equivalence.triangulation_differences, equivalence.original_max_vertices, equivalence.reused_max_vertices, equivalence.first_discrepancy.as_deref().unwrap_or("none"));
+        println!("[CLIP-MULTICAMERA-WORK] config={} route=original input={} inside={} outside={} crossing={} empty={} final_triangles={} max_polygon_vertices={} vertices_input={} vertices_processed={} vertices_written={} processed_by_plane={:?} written_by_plane={:?} polygon_vertices_by_plane={:?}", name, equivalence.original.input_triangles, equivalence.original.triangles_inside, equivalence.original.triangles_outside, equivalence.original.triangles_crossing, equivalence.original.empty_polygons, equivalence.original.final_triangles, equivalence.original.max_polygon_vertices, equivalence.original.input_triangles * 3, equivalence.original.vertices_processed, equivalence.original.vertices_written, equivalence.original.vertices_processed_by_plane, equivalence.original.vertices_written_by_plane, equivalence.original.polygon_vertices_by_plane);
+        println!("[CLIP-MULTICAMERA-WORK] config={} route=reused input={} inside={} outside={} crossing={} empty={} final_triangles={} max_polygon_vertices={} vertices_input={} vertices_processed={} vertices_written={} processed_by_plane={:?} written_by_plane={:?} polygon_vertices_by_plane={:?}", name, equivalence.reused.input_triangles, equivalence.reused.triangles_inside, equivalence.reused.triangles_outside, equivalence.reused.triangles_crossing, equivalence.reused.empty_polygons, equivalence.reused.final_triangles, equivalence.reused.max_polygon_vertices, equivalence.reused.input_triangles * 3, equivalence.reused.vertices_processed, equivalence.reused.vertices_written, equivalence.reused.vertices_processed_by_plane, equivalence.reused.vertices_written_by_plane, equivalence.reused.polygon_vertices_by_plane);
+        println!("[CLIP-MULTICAMERA-BUFFERS] config={} route=original vec_constructions={} capacity_changes={} max_capacity={} max_polygon_vertices={} empty_buffers={} capacity_bins={:?}", name, equivalence.original.vec_constructions, equivalence.original.capacity_growth_events, equivalence.original.max_capacity_a, equivalence.original.max_polygon_vertices, equivalence.original.empty_polygons, equivalence.original.capacity_bins);
+        println!("[CLIP-MULTICAMERA-BUFFERS] config={} route=reused vec_constructions={} capacity_changes={} retained_capacity_events={} max_capacity_a={} max_capacity_b={} max_stored_vertices={} empty_buffer_a={} empty_buffer_b={} capacity_bins={:?}", name, equivalence.reused.vec_constructions, equivalence.reused.capacity_growth_events, equivalence.reused.retained_capacity_events, equivalence.reused.max_capacity_a, equivalence.reused.max_capacity_b, equivalence.reused.max_polygon_vertices, equivalence.reused.empty_buffer_a_events, equivalence.reused.empty_buffer_b_events, equivalence.reused.capacity_bins);
+        if !include_benchmark { continue; }
+        let mut windows: Vec<(bool, Vec<f64>)> = Vec::with_capacity(order.len());
+        for &cached in &order {
+            let mut samples = Vec::with_capacity(MEASURED);
+            for iteration in 0..(WARMUP + MEASURED) {
+                let started = Instant::now();
+                let _framebuffer = render_frame(
+                    0.0, &selected_camera, solaris, vesper, selene, nymara,
+                    ring_inner, ring_middle, ring_outer, cryon, veridis, umbra, solene,
+                    poses, &shadow_scene, None, false, None, false, false, false,
+                    false, true, false, cached, None, None, None, None, None, None,
+                )?;
+                if iteration >= WARMUP { samples.push(started.elapsed().as_secs_f64() * 1000.0); }
+            }
+            samples.sort_by(f64::total_cmp);
+            windows.push((cached, samples));
+        }
+        for (index, (cached, samples)) in windows.iter().enumerate() {
+            let average = samples.iter().sum::<f64>() / samples.len() as f64;
+            let percentile = |p: f64| samples[((samples.len() - 1) as f64 * p).round() as usize];
+            let variance = samples.iter().map(|sample| (sample - average).powi(2)).sum::<f64>() / samples.len() as f64;
+            println!("[CLIP-MULTICAMERA-BENCH] config={} window={} pair={} order={} variant={} frames={} avg_ms={:.3} median_ms={:.3} p95_ms={:.3} p99_ms={:.3} stddev_ms={:.3} min_ms={:.3} max_ms={:.3}", name, index + 1, index / 2 + 1, if index % 2 == 0 { "first" } else { "second" }, if *cached { "reused" } else { "original" }, samples.len(), average, percentile(0.50), percentile(0.95), percentile(0.99), variance.sqrt(), samples[0], *samples.last().unwrap());
+        }
+        for pair in 0..5 {
+            let first = &windows[pair * 2];
+            let second = &windows[pair * 2 + 1];
+            let first_mean = first.1.iter().sum::<f64>() / first.1.len() as f64;
+            let second_mean = second.1.iter().sum::<f64>() / second.1.len() as f64;
+            let original = if first.0 { second_mean } else { first_mean };
+            let reused = if first.0 { first_mean } else { second_mean };
+            let difference = reused - original;
+            println!("[CLIP-MULTICAMERA-PAIR] config={} pair={} original_ms={:.3} reused_ms={:.3} difference_ms={:.3} difference_percent={:.3} favored={}", name, pair + 1, original, reused, difference, difference / original * 100.0, if difference < 0.0 { "reused" } else if difference > 0.0 { "original" } else { "tie" });
+        }
+        for &cached in &[false, true] {
+            let means: Vec<f64> = windows.iter().filter(|(variant, _)| *variant == cached).map(|(_, samples)| samples.iter().sum::<f64>() / samples.len() as f64).collect();
+            let mut sorted = means.clone(); sorted.sort_by(f64::total_cmp);
+            let mean = means.iter().sum::<f64>() / means.len() as f64;
+            let variance = means.iter().map(|sample| (sample - mean).powi(2)).sum::<f64>() / means.len() as f64;
+            println!("[CLIP-MULTICAMERA-SUMMARY] config={} variant={} windows={} mean_ms={:.3} median_ms={:.3} stddev_ms={:.3} min_ms={:.3} max_ms={:.3}", name, if cached { "reused" } else { "original" }, means.len(), mean, sorted[sorted.len() / 2], variance.sqrt(), sorted[0], sorted[sorted.len() - 1]);
+        }
+    }
+    Ok(())
+}
+
+fn merge_clip_stage_report(total: &mut ClipStageDiagnosticReport, value: &ClipStageDiagnosticReport) {
+    total.cases += value.cases;
+    total.polygons_compared += value.polygons_compared;
+    total.planes_compared += value.planes_compared;
+    total.vertices_compared += value.vertices_compared;
+    total.vertex_count_differences += value.vertex_count_differences;
+    total.order_differences += value.order_differences;
+    total.position_differences += value.position_differences;
+    total.attribute_differences += value.attribute_differences;
+    total.triangulation_differences += value.triangulation_differences;
+    total.original_max_vertices = total.original_max_vertices.max(value.original_max_vertices);
+    total.reused_max_vertices = total.reused_max_vertices.max(value.reused_max_vertices);
+    if total.first_discrepancy.is_none() { total.first_discrepancy = value.first_discrepancy.clone(); }
+    merge_clip_stats(&mut total.original, &value.original);
+    merge_clip_stats(&mut total.reused, &value.reused);
+}
+
+fn merge_clip_stats(total: &mut aetheria::shader::ClipBufferStats, value: &aetheria::shader::ClipBufferStats) {
+    total.input_triangles += value.input_triangles;
+    total.planes_processed += value.planes_processed;
+    total.vec_constructions += value.vec_constructions;
+    total.capacity_growth_events += value.capacity_growth_events;
+    total.max_capacity_a = total.max_capacity_a.max(value.max_capacity_a);
+    total.max_capacity_b = total.max_capacity_b.max(value.max_capacity_b);
+    total.vertices_written += value.vertices_written;
+    total.vertices_processed += value.vertices_processed;
+    total.empty_polygons += value.empty_polygons;
+    total.final_triangles += value.final_triangles;
+    total.triangles_inside += value.triangles_inside;
+    total.triangles_outside += value.triangles_outside;
+    total.triangles_crossing += value.triangles_crossing;
+    for index in 0..6 {
+        total.vertices_written_by_plane[index] += value.vertices_written_by_plane[index];
+        total.vertices_processed_by_plane[index] += value.vertices_processed_by_plane[index];
+        total.polygon_vertices_by_plane[index] += value.polygon_vertices_by_plane[index];
+    }
+    total.max_polygon_vertices = total.max_polygon_vertices.max(value.max_polygon_vertices);
+    total.retained_capacity_events += value.retained_capacity_events;
+    total.empty_buffer_a_events += value.empty_buffer_a_events;
+    total.empty_buffer_b_events += value.empty_buffer_b_events;
+    for index in 0..total.capacity_bins.len() {
+        total.capacity_bins[index] += value.capacity_bins[index];
+    }
 }
 
 #[cfg(feature = "interactive")]
@@ -1096,7 +1314,7 @@ fn run_fbm_benchmark(
         let _framebuffer = render_frame(
             0.0, camera, solaris, vesper, selene, nymara,
             ring_inner, ring_middle, ring_outer, cryon, veridis, umbra, solene,
-            poses, &shadow_scene, background_colors.as_deref(), false, None, false, framebuffer_fused_write, false, false, false, false,
+            poses, &shadow_scene, background_colors.as_deref(), false, None, false, framebuffer_fused_write, false, false, false, false, false, None,
             None, None, None, None, None,
         )?;
         let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
@@ -1140,6 +1358,7 @@ fn run_camera_matrices_benchmark(
     solene_motion: BodyMotion,
     shadow_bvh: bool,
     benchmark_normal_transform: bool,
+    benchmark_clip_buffers: bool,
 ) -> io::Result<()> {
     let poses = build_poses(
         0.0, solaris_motion, vesper_motion, nymara_motion, cryon_motion,
@@ -1151,7 +1370,10 @@ fn run_camera_matrices_benchmark(
     );
     const WARMUP: usize = 10;
     const MEASURED: usize = 60;
-    let order = [false, true, true, false, false, true, true, false, false, true];
+    let order = [
+        false, true, true, false, false, true, true, false, false, true,
+        true, false, false, true, true, false, false, true, true, false,
+    ];
     let mut windows: Vec<(bool, Vec<f64>)> = Vec::with_capacity(order.len());
     for &cached in &order {
         let mut samples = Vec::with_capacity(MEASURED);
@@ -1161,9 +1383,9 @@ fn run_camera_matrices_benchmark(
                 0.0, camera, solaris, vesper, selene, nymara,
                 ring_inner, ring_middle, ring_outer, cryon, veridis, umbra, solene,
                 poses, &shadow_scene, None, false, None, false, false, false,
-                if benchmark_normal_transform { false } else { cached }, true,
+                if benchmark_normal_transform || benchmark_clip_buffers { false } else { cached }, true,
                 if benchmark_normal_transform { cached } else { false },
-                None, None, None, None, None,
+                if benchmark_clip_buffers { cached } else { false }, None, None, None, None, None, None,
             )?;
             if iteration >= WARMUP {
                 samples.push(started.elapsed().as_secs_f64() * 1000.0);
@@ -1177,15 +1399,32 @@ fn run_camera_matrices_benchmark(
         let average = sum / samples.len() as f64;
         let percentile = |p: f64| samples[((samples.len() - 1) as f64 * p).round() as usize];
         let variance = samples.iter().map(|sample| (sample - average).powi(2)).sum::<f64>() / samples.len() as f64;
+        let tag = if benchmark_clip_buffers { "CLIP-BUFFERS-BENCH" } else { "MATRIX-TRANSFORM-BENCH" };
         println!(
-            "[MATRIX-TRANSFORM-BENCH] window={} pair={} order={} variant={} warmup={} measured={} avg_ms={:.3} median_ms={:.3} p95_ms={:.3} p99_ms={:.3} stddev_ms={:.3} min_ms={:.3} max_ms={:.3}",
-            index + 1, index / 2 + 1, if index % 2 == 0 { "first" } else { "second" },
-            if benchmark_normal_transform {
+            "[{}] window={} pair={} order={} variant={} warmup={} measured={} avg_ms={:.3} median_ms={:.3} p95_ms={:.3} p99_ms={:.3} stddev_ms={:.3} min_ms={:.3} max_ms={:.3}",
+            tag, index + 1, index / 2 + 1, if index % 2 == 0 { "first" } else { "second" },
+            if benchmark_clip_buffers {
+                if *cached { "clip-reused" } else { "clip-original" }
+            } else if benchmark_normal_transform {
                 if *cached { "normal-cached" } else { "normal-original" }
             } else if *cached { "camera-cached" } else { "camera-original" }, WARMUP, MEASURED,
             average, percentile(0.50), percentile(0.95), percentile(0.99), variance.sqrt(),
             samples[0], *samples.last().unwrap(),
         );
+    }
+    if benchmark_clip_buffers {
+        for pair in 0..(windows.len() / 2) {
+            let first = &windows[pair * 2];
+            let second = &windows[pair * 2 + 1];
+            let first_mean = first.1.iter().sum::<f64>() / first.1.len() as f64;
+            let second_mean = second.1.iter().sum::<f64>() / second.1.len() as f64;
+            let original = if first.0 { second_mean } else { first_mean };
+            let reused = if first.0 { first_mean } else { second_mean };
+            let difference = reused - original;
+            let percentage = difference / original * 100.0;
+            let favored = if difference < 0.0 { "reutilizada" } else if difference > 0.0 { "original" } else { "empate" };
+            println!("[CLIP-BUFFERS-PAIR] pair={} original_avg_ms={:.3} reused_avg_ms={:.3} difference_ms={:.3} difference_percent={:.3} favored={}", pair + 1, original, reused, difference, percentage, favored);
+        }
     }
     for &cached in &[false, true] {
         let means: Vec<f64> = windows.iter().filter(|(variant, _)| *variant == cached)
@@ -1194,10 +1433,14 @@ fn run_camera_matrices_benchmark(
         sorted.sort_by(f64::total_cmp);
         let mean = means.iter().sum::<f64>() / means.len() as f64;
         let variance = means.iter().map(|sample| (sample - mean).powi(2)).sum::<f64>() / means.len() as f64;
-        println!("[MATRIX-TRANSFORM-BENCH-SUMMARY] variant={} windows={} mean_of_window_means_ms={:.3} median_of_window_means_ms={:.3} stddev_ms={:.3} min_ms={:.3} max_ms={:.3}",
-            if benchmark_normal_transform {
+        let tag = if benchmark_clip_buffers { "CLIP-BUFFERS-BENCH-SUMMARY" } else { "MATRIX-TRANSFORM-BENCH-SUMMARY" };
+        println!("[{}] variant={} windows={} mean_of_window_means_ms={:.3} median_of_window_means_ms={:.3} stddev_ms={:.3} min_ms={:.3} max_ms={:.3}",
+            tag,
+            if benchmark_clip_buffers {
+                if cached { "clip-reused" } else { "clip-original" }
+            } else if benchmark_normal_transform {
                 if cached { "normal-cached" } else { "normal-original" }
-            } else if cached { "camera-cached" } else { "camera-original" }, means.len(), mean, sorted[2], variance.sqrt(), sorted[0], sorted[4]);
+            } else if cached { "camera-cached" } else { "camera-original" }, means.len(), mean, sorted[sorted.len() / 2], variance.sqrt(), sorted[0], sorted[sorted.len() - 1]);
     }
     Ok(())
 }
@@ -1243,7 +1486,7 @@ fn run_framebuffer_benchmark(
         let _framebuffer = render_frame(
             0.0, camera, solaris, vesper, selene, nymara,
             ring_inner, ring_middle, ring_outer, cryon, veridis, umbra, solene,
-            poses, &shadow_scene, None, false, None, false, framebuffer_fused_write, raster_incremental_coverage, false, false, false,
+            poses, &shadow_scene, None, false, None, false, framebuffer_fused_write, raster_incremental_coverage, false, false, false, false, None,
             None, None, None, None, None,
         )?;
         if iteration >= WARMUP {
@@ -1302,13 +1545,13 @@ fn run_framebuffer_compare(
     let original = render_frame(
         0.0, camera, solaris, vesper, selene, nymara,
         ring_inner, ring_middle, ring_outer, cryon, veridis, umbra, solene,
-        poses, &shadow_scene, None, false, None, false, false, false, false, false, false,
+        poses, &shadow_scene, None, false, None, false, false, false, false, false, false, false, None,
         None, None, None, None, None,
     )?;
     let fused = render_frame(
         0.0, camera, solaris, vesper, selene, nymara,
         ring_inner, ring_middle, ring_outer, cryon, veridis, umbra, solene,
-        poses, &shadow_scene, None, false, None, false, true, false, false, false, false,
+        poses, &shadow_scene, None, false, None, false, true, false, false, false, false, false, None,
         None, None, None, None, None,
     )?;
     let mut color_pixels = 0u64;
@@ -1374,14 +1617,14 @@ fn run_raster_incremental_compare(
     let original = render_frame(
         0.0, camera, solaris, vesper, selene, nymara,
         ring_inner, ring_middle, ring_outer, cryon, veridis, umbra, solene,
-        poses, &shadow_scene, None, false, None, false, false, false, false, false, false,
-        None, Some(original_profile.clone()), None, None, None,
+        poses, &shadow_scene, None, false, None, false, false, false, false, false, false, false, None, None,
+        Some(original_profile.clone()), None, None, None,
     )?;
     let incremental = render_frame(
         0.0, camera, solaris, vesper, selene, nymara,
         ring_inner, ring_middle, ring_outer, cryon, veridis, umbra, solene,
-        poses, &shadow_scene, None, false, None, false, false, true, false, false, false,
-        None, Some(incremental_profile.clone()), None, None, None,
+        poses, &shadow_scene, None, false, None, false, false, false, true, false, false, false, None, None,
+        Some(incremental_profile.clone()), None, None, None,
     )?;
     let a = original_profile.snapshot();
     let b = incremental_profile.snapshot();
@@ -1474,6 +1717,8 @@ fn render_frame(
     camera_matrices_cached: bool,
     suppress_render_log: bool,
     normal_transform_cached: bool,
+    clip_buffers_reused: bool,
+    clip_buffer_stats: Option<Arc<std::sync::Mutex<ClipBufferStats>>>,
     detail_profile: Option<DetailedProfile>,
     raster_detail_profile: Option<RasterDetailProfile>,
     shader_detail_profile: Option<ShaderDetailProfile>,
@@ -1504,6 +1749,8 @@ fn render_frame(
             view: camera.view_matrix(),
             projection: camera.projection_matrix(),
         }),
+        clip_buffers_reused,
+        clip_buffer_stats,
         detail_profile,
         raster_detail_profile,
         shader_detail_profile,
