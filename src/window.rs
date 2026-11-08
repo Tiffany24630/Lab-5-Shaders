@@ -50,6 +50,10 @@ impl CpuWindow {
         self.window.get_keys_pressed(KeyRepeat::No)
     }
 
+    pub fn is_key_down(&self, key: Key) -> bool {
+        self.window.is_key_down(key)
+    }
+
     pub fn run_until_closed(&mut self) -> Result<(), String> {
         while self.is_open() {
             self.present()?;

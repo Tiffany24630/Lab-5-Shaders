@@ -274,6 +274,7 @@ fn main() -> io::Result<()> {
     let mut clip_buffers_stress_compare = false;
     let mut clip_buffers_multicamera = false;
     let mut benchmark_clip_buffers = false;
+    let mut vesper_experimental_obj = false;
     let mut preview = None;
     let mut arguments = env::args().skip(1);
     while let Some(argument) = arguments.next() {
@@ -341,13 +342,14 @@ fn main() -> io::Result<()> {
             "--clip-buffers-stress-compare" => clip_buffers_stress_compare = true,
             "--clip-buffers-multicamera" => clip_buffers_multicamera = true,
             "--benchmark-clip-buffers" => benchmark_clip_buffers = true,
+            "--vesper-experimental-obj" => vesper_experimental_obj = true,
             "--preview" => {
                 let value = arguments.next().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "--preview requiere original, A, B o C"))?;
                 preview = Some(PreviewCurve::parse(&value).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "preview invalido: use original, A, B o C"))?);
                 diagnostics = true;
             }
             _ => {
-                eprintln!("Uso: aetheria [--offline] [--interactive] [--diagnostics] [--diagnostics-only] [--preview original|A|B|C] [--profile] [--profile-detail] [--profile-raster-detail] [--profile-shader-detail] [--profile-procedural-detail] [--benchmark-static] [--benchmark-framebuffer-write] [--benchmark-camera-matrices] [--benchmark-normal-transform] [--benchmark-clip-buffers] [--framebuffer-fused-write] [--framebuffer-fused-compare] [--raster-incremental-coverage] [--raster-incremental-compare] [--camera-matrices-cached] [--camera-matrices-compare] [--normal-transform-cached] [--normal-transform-compare] [--clip-buffers-reused] [--clip-buffers-compare] [--clip-buffers-stress-compare] [--clip-buffers-multicamera] [--shadow-bvh] [--shadow-brute-force] [--shadow-compare] [--shadow-compare-all] [--solene-normalized] [--solene-experiment-original] [--fbm-original|--fbm-precomputed|--fbm-compare]");
+                eprintln!("Uso: aetheria [--offline] [--interactive] [--diagnostics] [--diagnostics-only] [--preview original|A|B|C] [--profile] [--profile-detail] [--profile-raster-detail] [--profile-shader-detail] [--profile-procedural-detail] [--benchmark-static] [--benchmark-framebuffer-write] [--benchmark-camera-matrices] [--benchmark-normal-transform] [--benchmark-clip-buffers] [--framebuffer-fused-write] [--framebuffer-fused-compare] [--raster-incremental-coverage] [--raster-incremental-compare] [--camera-matrices-cached] [--camera-matrices-compare] [--normal-transform-cached] [--normal-transform-compare] [--clip-buffers-reused] [--clip-buffers-compare] [--clip-buffers-stress-compare] [--clip-buffers-multicamera] [--shadow-bvh] [--shadow-brute-force] [--shadow-compare] [--shadow-compare-all] [--solene-normalized] [--solene-experiment-original] [--fbm-original|--fbm-precomputed|--fbm-compare] [--vesper-experimental-obj]");
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "argumento desconocido"));
             }
         }
@@ -427,7 +429,7 @@ fn main() -> io::Result<()> {
     if interactive {
         #[cfg(feature = "interactive")]
         {
-            return run_app(true, diagnostics, diagnostics_only, preview, profile, profile_detail, profile_raster_detail, profile_shader_detail, profile_procedural_detail, benchmark_static, shadow_bvh, shadow_compare, shadow_compare_all, solene_normalized, solene_experiment_original, fbm_precomputed, fbm_original, fbm_compare, benchmark_fbm, framebuffer_fused_write, framebuffer_compare, benchmark_framebuffer, raster_incremental_coverage, raster_incremental_compare, camera_matrices_cached, camera_matrices_compare, benchmark_camera_matrices, normal_transform_cached, normal_transform_compare, benchmark_normal_transform, clip_buffers_reused, clip_buffers_compare, clip_buffers_stress_compare, clip_buffers_multicamera, benchmark_clip_buffers);
+            return run_app(true, diagnostics, diagnostics_only, preview, profile, profile_detail, profile_raster_detail, profile_shader_detail, profile_procedural_detail, benchmark_static, shadow_bvh, shadow_compare, shadow_compare_all, solene_normalized, solene_experiment_original, fbm_precomputed, fbm_original, fbm_compare, benchmark_fbm, framebuffer_fused_write, framebuffer_compare, benchmark_framebuffer, raster_incremental_coverage, raster_incremental_compare, camera_matrices_cached, camera_matrices_compare, benchmark_camera_matrices, normal_transform_cached, normal_transform_compare, benchmark_normal_transform, clip_buffers_reused, clip_buffers_compare, clip_buffers_stress_compare, clip_buffers_multicamera, benchmark_clip_buffers, vesper_experimental_obj);
         }
         #[cfg(not(feature = "interactive"))]
         {
@@ -435,10 +437,10 @@ fn main() -> io::Result<()> {
             return Err(io::Error::new(io::ErrorKind::Unsupported, "feature interactive no habilitada"));
         }
     }
-    run_app(false, diagnostics, diagnostics_only, preview, profile, profile_detail, profile_raster_detail, profile_shader_detail, profile_procedural_detail, benchmark_static, shadow_bvh, shadow_compare, shadow_compare_all, solene_normalized, solene_experiment_original, fbm_precomputed, fbm_original, fbm_compare, benchmark_fbm, framebuffer_fused_write, framebuffer_compare, benchmark_framebuffer, raster_incremental_coverage, raster_incremental_compare, camera_matrices_cached, camera_matrices_compare, benchmark_camera_matrices, normal_transform_cached, normal_transform_compare, benchmark_normal_transform, clip_buffers_reused, clip_buffers_compare, clip_buffers_stress_compare, clip_buffers_multicamera, benchmark_clip_buffers)
+    run_app(false, diagnostics, diagnostics_only, preview, profile, profile_detail, profile_raster_detail, profile_shader_detail, profile_procedural_detail, benchmark_static, shadow_bvh, shadow_compare, shadow_compare_all, solene_normalized, solene_experiment_original, fbm_precomputed, fbm_original, fbm_compare, benchmark_fbm, framebuffer_fused_write, framebuffer_compare, benchmark_framebuffer, raster_incremental_coverage, raster_incremental_compare, camera_matrices_cached, camera_matrices_compare, benchmark_camera_matrices, normal_transform_cached, normal_transform_compare, benchmark_normal_transform, clip_buffers_reused, clip_buffers_compare, clip_buffers_stress_compare, clip_buffers_multicamera, benchmark_clip_buffers, vesper_experimental_obj)
 }
 
-fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool, preview: Option<PreviewCurve>, profile_enabled: bool, profile_detail: bool, profile_raster_detail: bool, profile_shader_detail: bool, profile_procedural_detail: bool, benchmark_static: bool, shadow_bvh: bool, shadow_compare: bool, shadow_compare_all: bool, solene_normalized: bool, solene_experiment_original: bool, fbm_precomputed: bool, fbm_original: bool, fbm_compare: bool, benchmark_fbm: bool, framebuffer_fused_write: bool, framebuffer_compare: bool, benchmark_framebuffer: bool, raster_incremental_coverage: bool, raster_incremental_compare: bool, camera_matrices_cached: bool, camera_matrices_compare: bool, benchmark_camera_matrices: bool, normal_transform_cached: bool, normal_transform_compare: bool, benchmark_normal_transform: bool, clip_buffers_reused: bool, clip_buffers_compare: bool, clip_buffers_stress_compare: bool, clip_buffers_multicamera: bool, benchmark_clip_buffers: bool) -> io::Result<()> {
+fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool, preview: Option<PreviewCurve>, profile_enabled: bool, profile_detail: bool, profile_raster_detail: bool, profile_shader_detail: bool, profile_procedural_detail: bool, benchmark_static: bool, shadow_bvh: bool, shadow_compare: bool, shadow_compare_all: bool, solene_normalized: bool, solene_experiment_original: bool, fbm_precomputed: bool, fbm_original: bool, fbm_compare: bool, benchmark_fbm: bool, framebuffer_fused_write: bool, framebuffer_compare: bool, benchmark_framebuffer: bool, raster_incremental_coverage: bool, raster_incremental_compare: bool, camera_matrices_cached: bool, camera_matrices_compare: bool, benchmark_camera_matrices: bool, normal_transform_cached: bool, normal_transform_compare: bool, benchmark_normal_transform: bool, clip_buffers_reused: bool, clip_buffers_compare: bool, clip_buffers_stress_compare: bool, clip_buffers_multicamera: bool, benchmark_clip_buffers: bool, vesper_experimental_obj: bool) -> io::Result<()> {
     #[cfg(not(feature = "interactive"))]
     let _ = profile_enabled;
     #[cfg(not(feature = "interactive"))]
@@ -460,7 +462,15 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
     #[cfg(not(feature = "interactive"))]
     let _ = shadow_compare_all;
     let solaris = load_obj("assets/models/obj/solaris.obj").map_err(io::Error::other)?;
-    let vesper = load_obj("assets/models/obj/vesper.obj").map_err(io::Error::other)?;
+    let vesper_path = if vesper_experimental_obj {
+        "assets/models/obj/vesper_experimental_subdivided.obj"
+    } else {
+        "assets/models/obj/vesper.obj"
+    };
+    if vesper_experimental_obj {
+        println!("[VESPER-MODEL] experimental={vesper_path}");
+    }
+    let vesper = load_obj(vesper_path).map_err(io::Error::other)?;
     let selene = load_obj("assets/models/obj/selene.obj").map_err(io::Error::other)?;
     let nymara = load_obj("assets/models/obj/nymara.obj").map_err(io::Error::other)?;
     let ring_inner = load_obj("assets/models/obj/nymara_ring_inner.obj").map_err(io::Error::other)?;
@@ -612,7 +622,7 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
         });
         let mut window = CpuWindow::new("AETHERIA — CPU Renderer", &framebuffer)
             .map_err(io::Error::other)?;
-        println!("Controles: arrastre izquierdo = rotar, rueda = zoom, 1-8 = objetivo, R = restablecer");
+        println!("Controles: arrastre izquierdo = rotar, rueda = zoom, 1-8 o teclado numerico = objetivo, R = restablecer");
         println!("Simulacion: Espacio = pausa/reanudar, +/- = velocidad, N = paso manual");
         println!("Reproduciendo; velocidad {:.2}x; tiempo {:.3}; objetivo {}", clock.speed(), clock.time(), target_name(controller.target_id));
         let mut dragging = false;
@@ -665,15 +675,40 @@ fn run_app(_interactive: bool, diagnostics_enabled: bool, diagnostics_only: bool
                     camera_changed = controller != previous_controller;
                 }
             }
-            for key in window.pressed_keys() {
-                if let Some(target) = body_id_from_key(key) {
-                    let previous_controller = controller;
-                    controller.set_target(target);
-                    if controller != previous_controller {
-                        println!("Objetivo seleccionado: {}", target_name(target));
-                        camera_changed = true;
-                        hud_dirty = true;
-                    }
+            let pressed_keys = window.pressed_keys();
+            let target_from_event = pressed_keys.iter().copied().find_map(body_id_from_key);
+            let target_from_state = [
+                (Key::Key1, BodyId::Solaris),
+                (Key::Key2, BodyId::Vesper),
+                (Key::Key3, BodyId::Selene),
+                (Key::Key4, BodyId::Nymara),
+                (Key::Key5, BodyId::Cryon),
+                (Key::Key6, BodyId::Veridis),
+                (Key::Key7, BodyId::Umbra),
+                (Key::Key8, BodyId::Solene),
+                (Key::NumPad1, BodyId::Solaris),
+                (Key::NumPad2, BodyId::Vesper),
+                (Key::NumPad3, BodyId::Selene),
+                (Key::NumPad4, BodyId::Nymara),
+                (Key::NumPad5, BodyId::Cryon),
+                (Key::NumPad6, BodyId::Veridis),
+                (Key::NumPad7, BodyId::Umbra),
+                (Key::NumPad8, BodyId::Solene),
+            ]
+            .into_iter()
+            .find_map(|(key, target)| window.is_key_down(key).then_some(target));
+            if let Some(target) = target_from_event.or(target_from_state) {
+                let previous_controller = controller;
+                controller.set_target(target);
+                if controller != previous_controller {
+                    println!("Objetivo seleccionado: {}", target_name(target));
+                    camera_changed = true;
+                    hud_dirty = true;
+                }
+            }
+            for key in pressed_keys {
+                if body_id_from_key(key).is_some() {
+                    continue;
                 } else if key == Key::R {
                     let previous_controller = controller;
                     controller.set_target(BodyId::Solaris);
@@ -1190,14 +1225,14 @@ fn merge_clip_stats(total: &mut aetheria::shader::ClipBufferStats, value: &aethe
 #[cfg(feature = "interactive")]
 fn body_id_from_key(key: Key) -> Option<BodyId> {
     Some(match key {
-        Key::Key1 => BodyId::Solaris,
-        Key::Key2 => BodyId::Vesper,
-        Key::Key3 => BodyId::Selene,
-        Key::Key4 => BodyId::Nymara,
-        Key::Key5 => BodyId::Cryon,
-        Key::Key6 => BodyId::Veridis,
-        Key::Key7 => BodyId::Umbra,
-        Key::Key8 => BodyId::Solene,
+        Key::Key1 | Key::NumPad1 => BodyId::Solaris,
+        Key::Key2 | Key::NumPad2 => BodyId::Vesper,
+        Key::Key3 | Key::NumPad3 => BodyId::Selene,
+        Key::Key4 | Key::NumPad4 => BodyId::Nymara,
+        Key::Key5 | Key::NumPad5 => BodyId::Cryon,
+        Key::Key6 | Key::NumPad6 => BodyId::Veridis,
+        Key::Key7 | Key::NumPad7 => BodyId::Umbra,
+        Key::Key8 | Key::NumPad8 => BodyId::Solene,
         _ => return None,
     })
 }

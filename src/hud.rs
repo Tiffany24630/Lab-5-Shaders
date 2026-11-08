@@ -33,7 +33,7 @@ pub fn draw(framebuffer: &mut Framebuffer, state: HudState<'_>) {
 
     draw_text(framebuffer, 28, 520, "DRAG: ROTATE", 1, TEXT);
     draw_text(framebuffer, 170, 520, "WHEEL: ZOOM", 1, TEXT);
-    draw_text(framebuffer, 28, 538, "1-8: SELECT TARGET", 1, SECONDARY);
+    draw_text(framebuffer, 28, 538, "1-8 / NUMPAD: TARGET", 1, SECONDARY);
     draw_text(framebuffer, 28, 556, "SPACE: PAUSE   R: RESET", 1, SECONDARY);
 }
 
