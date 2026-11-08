@@ -41,12 +41,21 @@ La ejecución normal carga los modelos OBJ de `assets/models/obj/`.
 La selección de objetivos se lee tanto por eventos de teclado como por el estado actual de la tecla para evitar perder pulsaciones durante frames pesados.
 
 ## Imágenes
-![alt text](image.png)
-![alt text](image-1.png)
-![alt text](image-2.png)
-![alt text](image-3.png)
-![alt text](image-4.png)
-![alt text](image-5.png)
-![alt text](image-6.png)
-![alt text](image-7.png)
-<video controls src="20261108-1516-03.7388259.mp4" title="Video"></video>
+Las capturas del proyecto están organizadas en [`assets/media/images/`](assets/media/images/).
+
+| Captura | Vista |
+|---|---|
+| ![Captura 1](assets/media/images/image.png) | Sistema AETHERIA |
+| ![Captura 2](assets/media/images/image-1.png) | Vista de Solaris |
+| ![Captura 3](assets/media/images/image-2.png) | Vista de Vesper |
+| ![Captura 4](assets/media/images/image-3.png) | Vista de Selene |
+| ![Captura 5](assets/media/images/image-4.png) | Vista de Nymara |
+| ![Captura 6](assets/media/images/image-5.png) | Vista de Cryon |
+| ![Captura 7](assets/media/images/image-6.png) | Vista de Veridis |
+| ![Captura 8](assets/media/images/image-7.png) | Vista de Umbra o Solene |
+
+## Video
+
+El video de demostración está en [`assets/media/video/`](assets/media/video/).
+
+<video controls width="800" src="assets/media/video/20261108-1516-03.7388259.mp4" title="Demostración de AETHERIA"></video>
