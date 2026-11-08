@@ -39,3 +39,14 @@ La ejecución normal carga los modelos OBJ de `assets/models/obj/`.
 | `Esc` | Cerrar la ventana |
 
 La selección de objetivos se lee tanto por eventos de teclado como por el estado actual de la tecla para evitar perder pulsaciones durante frames pesados.
+
+## Imágenes
+![alt text](image.png)
+![alt text](image-1.png)
+![alt text](image-2.png)
+![alt text](image-3.png)
+![alt text](image-4.png)
+![alt text](image-5.png)
+![alt text](image-6.png)
+![alt text](image-7.png)
+<video controls src="20261108-1516-03.7388259.mp4" title="Video"></video>
